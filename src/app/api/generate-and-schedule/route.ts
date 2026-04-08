@@ -9,22 +9,27 @@ import { Client } from '@upstash/qstash';
 export async function POST(req: Request) {
   try {
     const body = await req.json();
-    const { 
-      formUrl, 
-      fields, 
-      context, 
-      count, 
-      timeWindowHours, 
-      groqApiKey, 
-      qstashToken,
+    const {
+      formUrl,
+      fields,
+      context,
+      count,
+      timeWindowHours,
       fbzx
     } = body;
 
-    if (!formUrl || !fields || !count || !groqApiKey || !qstashToken) {
+    if (!formUrl || !fields || !count) {
       return NextResponse.json({ error: 'Missing required configuration parameters.' }, { status: 400 });
     }
 
-    const groq = new Groq({ apiKey: groqApiKey });
+    const groqKey = process.env.GROQ_API_KEY;
+    const qstashToken = process.env.QSTASH_TOKEN;
+
+    if (!groqKey || !qstashToken) {
+      return NextResponse.json({ error: "Missing API keys" }, { status: 500 });
+    }
+
+    const groq = new Groq({ apiKey: groqKey });
 
     // Ask Groq to generate a JSON array
     const prompt = `
@@ -53,7 +58,7 @@ Return ONLY the raw JSON array, without any markdown formatting like \`\`\`json.
     let content = chatCompletion.choices[0]?.message?.content || '[]';
     // Clean up potential markdown formatting if the model still includes it
     content = content.replace(/```json/g, '').replace(/```/g, '').trim();
-    
+
     let generatedData: any[];
     try {
       generatedData = JSON.parse(content);
@@ -74,12 +79,12 @@ Return ONLY the raw JSON array, without any markdown formatting like \`\`\`json.
     const qstash = new Client({ token: qstashToken });
 
     const maxDelayMinutes = (timeWindowHours || 0) * 60;
-    
+
     // Create publish promises
     const promises = generatedData.map((mockData) => {
       // If timeWindowHours is 0, submit immediately (no delay)
       const delayMinutes = maxDelayMinutes > 0 ? Math.floor(Math.random() * maxDelayMinutes) : 0;
-      
+
       const payload: any = {
         url: submitUrl,
         body: { formUrl, data: mockData, fbzx }
@@ -99,10 +104,10 @@ Return ONLY the raw JSON array, without any markdown formatting like \`\`\`json.
       await Promise.all(promises.slice(i, i + chunkSize));
     }
 
-    return NextResponse.json({ 
-      success: true, 
+    return NextResponse.json({
+      success: true,
       message: `Successfully generated and scheduled ${generatedData.length} responses.`,
-      scheduledCount: generatedData.length 
+      scheduledCount: generatedData.length
     });
 
   } catch (error: any) {

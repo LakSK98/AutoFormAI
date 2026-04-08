@@ -10,15 +10,13 @@ export default function Home() {
   const [url, setUrl] = useState("");
   const [isScraping, setIsScraping] = useState(false);
   const [scrapeError, setScrapeError] = useState("");
-  
+
   const [formConfig, setFormConfig] = useState<any>(null);
-  
+
   const [context, setContext] = useState("A software developer using the product for a month.");
   const [count, setCount] = useState(5);
   const [timeWindow, setTimeWindow] = useState(2);
-  const [groqKey, setGroqKey] = useState("");
-  const [qstashToken, setQstashToken] = useState("");
-  
+
   const [isScheduling, setIsScheduling] = useState(false);
   const [scheduleSuccess, setScheduleSuccess] = useState(false);
   const [scheduleError, setScheduleError] = useState("");
@@ -39,11 +37,11 @@ export default function Home() {
   };
 
   const handleSchedule = async () => {
-    if (!groqKey || !qstashToken || !context) {
+    if (!context) {
       setScheduleError("Please fill in all required fields.");
       return;
     }
-    
+
     setIsScheduling(true);
     setScheduleError("");
     try {
@@ -54,8 +52,6 @@ export default function Home() {
         context,
         count,
         timeWindowHours: timeWindow,
-        groqApiKey: groqKey,
-        qstashToken: qstashToken
       });
       setScheduleSuccess(true);
       setStep(3);
@@ -75,8 +71,8 @@ export default function Home() {
 
       <div className="w-full max-w-4xl z-10">
         <div className="text-center mb-12">
-          <motion.div 
-            initial={{ y: -20, opacity: 0 }} 
+          <motion.div
+            initial={{ y: -20, opacity: 0 }}
             animate={{ y: 0, opacity: 1 }}
             className="flex items-center justify-center gap-3 mb-4"
           >
@@ -85,8 +81,8 @@ export default function Home() {
               AutoForm AI
             </h1>
           </motion.div>
-          <motion.p 
-            initial={{ y: 20, opacity: 0 }} 
+          <motion.p
+            initial={{ y: 20, opacity: 0 }}
             animate={{ y: 0, opacity: 1 }}
             transition={{ delay: 0.1 }}
             className="text-muted-foreground text-lg"
@@ -109,13 +105,13 @@ export default function Home() {
                   <h2 className="text-2xl font-semibold mb-2">1. Connect Your Form</h2>
                   <p className="text-muted-foreground">Paste the link to your Google Form to extract the fields.</p>
                 </div>
-                
+
                 <div className="space-y-4">
                   <div className="relative">
                     <Database className="absolute left-4 top-1/2 -translate-y-1/2 text-muted-foreground w-5 h-5" />
-                    <input 
-                      type="url" 
-                      placeholder="https://docs.google.com/forms/..." 
+                    <input
+                      type="url"
+                      placeholder="https://docs.google.com/forms/..."
                       className="input-field w-full pl-12 pr-4 py-4 rounded-xl text-lg"
                       value={url}
                       onChange={(e) => setUrl(e.target.value)}
@@ -124,15 +120,15 @@ export default function Home() {
                   {scrapeError && (
                     <p className="text-red-400 text-sm mt-2">{scrapeError}</p>
                   )}
-                  <button 
+                  <button
                     onClick={handleScrape}
                     disabled={isScraping || !url}
                     className="btn-primary w-full py-4 rounded-xl font-semibold flex items-center justify-center gap-2"
                   >
                     {isScraping ? (
                       <span className="flex items-center gap-2">
-                         <motion.div animate={{ rotate: 360 }} transition={{ repeat: Infinity, duration: 1, ease: "linear" }} className="w-5 h-5 border-2 border-white/30 border-t-white rounded-full" />
-                         Analyzing Form...
+                        <motion.div animate={{ rotate: 360 }} transition={{ repeat: Infinity, duration: 1, ease: "linear" }} className="w-5 h-5 border-2 border-white/30 border-t-white rounded-full" />
+                        Analyzing Form...
                       </span>
                     ) : (
                       <>
@@ -161,7 +157,7 @@ export default function Home() {
                   </p>
                 </div>
 
-                <div className="grid grid-cols-1 md:grid-cols-2 gap-8">
+                <div className="grid grid-cols-1 md:grid-cols-1 gap-8">
                   <div className="space-y-6">
                     <div>
                       <label className="block text-sm font-medium mb-2 text-slate-300">Target Persona / Context</label>
@@ -172,7 +168,7 @@ export default function Home() {
                         placeholder="Describe the type of person filling out the form..."
                       />
                     </div>
-                    
+
                     <div className="grid grid-cols-2 gap-4">
                       <div>
                         <label className="block text-sm font-medium mb-2 text-slate-300">Response Count</label>
@@ -195,30 +191,6 @@ export default function Home() {
                           min={0}
                         />
                       </div>
-                    </div>
-                  </div>
-
-                  <div className="space-y-6 bg-slate-800/30 p-6 rounded-2xl border border-slate-700/50">
-                    <h3 className="font-medium flex items-center gap-2"><Key className="w-4 h-4 text-primary" /> API Credentials</h3>
-                    <div>
-                      <label className="block text-sm font-medium mb-2 text-slate-400">Groq API Key (AI Generator)</label>
-                      <input
-                        type="password"
-                        className="input-field w-full p-3 rounded-xl text-sm"
-                        value={groqKey}
-                        onChange={(e) => setGroqKey(e.target.value)}
-                        placeholder="gsk_..."
-                      />
-                    </div>
-                    <div>
-                      <label className="block text-sm font-medium mb-2 text-slate-400">Upstash QStash Token (Scheduler)</label>
-                      <input
-                        type="password"
-                        className="input-field w-full p-3 rounded-xl text-sm"
-                        value={qstashToken}
-                        onChange={(e) => setQstashToken(e.target.value)}
-                        placeholder="ey..."
-                      />
                     </div>
                   </div>
                 </div>
