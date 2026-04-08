@@ -1,0 +1,32 @@
+{
+  "name": "fake-responses",
+  "version": "0.1.0",
+  "private": true,
+  "scripts": {
+    "dev": "next dev",
+    "build": "next build",
+    "start": "next start",
+    "lint": "eslint"
+  },
+  "dependencies": {
+    "next": "16.2.2",
+    "react": "19.2.4",
+    "react-dom": "19.2.4",
+    "axios": "^1.6.0",
+    "cheerio": "^1.0.0-rc.12",
+    "groq-sdk": "^0.3.0",
+    "@upstash/qstash": "^2.1.2",
+    "lucide-react": "^0.300.0",
+    "framer-motion": "^10.16.4"
+  },
+  "devDependencies": {
+    "@tailwindcss/postcss": "^4",
+    "@types/node": "^20",
+    "@types/react": "^19",
+    "@types/react-dom": "^19",
+    "eslint": "^9",
+    "eslint-config-next": "16.2.2",
+    "tailwindcss": "^4",
+    "typescript": "^5"
+  }
+}
