@@ -50,6 +50,7 @@ export default function Home() {
       await axios.post("/api/generate-and-schedule", {
         formUrl: formConfig.submitUrl,
         fields: formConfig.fields,
+        fbzx: formConfig.fbzx,
         context,
         count,
         timeWindowHours: timeWindow,
@@ -237,7 +238,7 @@ export default function Home() {
                   </button>
                   <button
                     onClick={handleSchedule}
-                    disabled={isScheduling}
+                    disabled={isScheduling || !formConfig?.fields?.length}
                     className="btn-primary flex-1 py-4 rounded-xl font-semibold flex items-center justify-center gap-2"
                   >
                     {isScheduling ? "Generating & Scheduling..." : <><Send className="w-5 h-5" /> Launch Campaign</>}

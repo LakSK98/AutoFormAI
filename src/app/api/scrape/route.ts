@@ -106,8 +106,25 @@ export async function POST(req: Request) {
       });
     }
 
-    const formTitle = $('div[role="heading"][aria-level="1"]').text().trim() || $('title').text().replace(' - Google Forms', '').trim() || 'Untitled Form';
+    // Extract form tokens like fbzx
+    const fbzxMatch = html.match(/name="fbzx" value="(.*?)"/);
+    const fbzx = fbzxMatch ? fbzxMatch[1] : "";
+
+    let formTitle = $('div[role="heading"][aria-level="1"]').text().trim() || $('title').text().replace(' - Google Forms', '').trim() || 'Untitled Form';
     
+    // Check if we were redirected to a login page (only check for actual login page URLs)
+    if (formTitle.toLowerCase().includes('sign-in') || html.includes('ServiceLogin') || html.includes('accounts.google.com/v3/signin')) {
+       return NextResponse.json({ 
+          error: 'This form seems to be private or requires login. Please make sure the form is public and "Restrict to users in [Organization]" is unchecked in form settings.' 
+       }, { status: 403 });
+    }
+
+    if (fields.length === 0 && !html.includes('entry.')) {
+        return NextResponse.json({ 
+          error: 'No fields could be discovered. Please ensure the form URL is correct and public.' 
+       }, { status: 404 });
+    }
+
     // We also need the exact form submission action URL
     // Basically it's the viewform URL with `viewform` replaced by `formResponse`
     const submitUrl = viewUrl.replace('/viewform', '/formResponse');
@@ -115,7 +132,8 @@ export async function POST(req: Request) {
     return NextResponse.json({ 
       title: formTitle, 
       submitUrl,
-      fields 
+      fields,
+      fbzx
     });
 
   } catch (error: any) {

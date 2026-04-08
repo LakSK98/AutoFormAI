@@ -11,6 +11,11 @@ export async function POST(req: Request) {
 
     const params = new URLSearchParams();
     
+    // Core parameters for Google Forms
+    if (body.fbzx) params.append('fbzx', body.fbzx);
+    params.append('fvv', '1');
+    params.append('pageHistory', '0');
+    
     // Convert object properties to form-encoded parameters
     for (const key of Object.keys(data)) {
         const value = data[key];

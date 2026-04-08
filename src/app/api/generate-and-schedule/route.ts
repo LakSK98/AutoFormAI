@@ -16,7 +16,8 @@ export async function POST(req: Request) {
       count, 
       timeWindowHours, 
       groqApiKey, 
-      qstashToken 
+      qstashToken,
+      fbzx
     } = body;
 
     if (!formUrl || !fields || !count || !groqApiKey || !qstashToken) {
@@ -81,7 +82,7 @@ Return ONLY the raw JSON array, without any markdown formatting like \`\`\`json.
       
       const payload: any = {
         url: submitUrl,
-        body: { formUrl, data: mockData }
+        body: { formUrl, data: mockData, fbzx }
       };
 
       if (delayMinutes > 0) {
