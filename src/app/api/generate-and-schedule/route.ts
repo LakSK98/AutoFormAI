@@ -2,103 +2,102 @@ import { NextResponse } from 'next/server';
 import Groq from 'groq-sdk';
 import { Client } from '@upstash/qstash';
 
-// Vercel serverless functions usually timeout after 15s on free tier.
-// We might want to use Edge runtime, but Groq and Qstash usually work fine on Node runtime.
-// export const runtime = 'edge'; 
-
 export async function POST(req: Request) {
   try {
     const body = await req.json();
-    const {
-      formUrl,
-      fields,
-      context,
-      count,
-      timeWindowHours,
-      fbzx
-    } = body;
+    const { formUrl, fields, context, count, timeWindowHours, fbzx } = body;
 
     if (!formUrl || !fields || !count) {
       return NextResponse.json({ error: 'Missing required configuration parameters.' }, { status: 400 });
     }
 
-    const groqKey = process.env.GROQ_API_KEY;
+    const groqKey  = process.env.GROQ_API_KEY;
     const qstashToken = process.env.QSTASH_TOKEN;
 
     if (!groqKey || !qstashToken) {
-      return NextResponse.json({ error: "Missing API keys" }, { status: 500 });
+      return NextResponse.json({ error: 'Missing API keys.' }, { status: 500 });
     }
 
     const groq = new Groq({ apiKey: groqKey });
 
-    // Ask Groq to generate a JSON array
+    // Build a human-readable field guide so the LLM knows exactly what format each type needs
+    const fieldGuide = fields.map((f: any) => {
+      let hint = '';
+      switch (f.type) {
+        case 'text':        hint = 'Short text answer.'; break;
+        case 'textarea':    hint = 'Longer paragraph answer.'; break;
+        case 'radio':       hint = `Pick exactly ONE from: ${JSON.stringify(f.options ?? [])}.`; break;
+        case 'dropdown':    hint = `Pick exactly ONE from: ${JSON.stringify(f.options ?? [])}.`; break;
+        case 'checkbox':    hint = `Pick one OR MORE from: ${JSON.stringify(f.options ?? [])}. Return as a JSON array e.g. ["A","B"].`; break;
+        case 'linear_scale':
+          hint = `Integer between ${f.low ?? 1} and ${f.high ?? 5}.`
+               + (f.lowLabel  ? ` (${f.low} = ${f.lowLabel})` : '')
+               + (f.highLabel ? ` (${f.high} = ${f.highLabel})` : '') + '.';
+          break;
+        case 'rating':      hint = `Integer between 1 and ${f.high ?? 5}.`; break;
+        case 'radio_grid':  hint = `Pick exactly ONE column value from: ${JSON.stringify(f.options ?? [])}. This is one row of a grid.`; break;
+        case 'checkbox_grid': hint = `Pick one OR MORE column values from: ${JSON.stringify(f.options ?? [])}. Return as a JSON array.`; break;
+        case 'date':        hint = 'Date string in YYYY-MM-DD format.'; break;
+        case 'time':        hint = 'Time string in HH:MM (24-hour) format.'; break;
+        default:            hint = 'Text answer.';
+      }
+      return { name: f.name, title: f.title, type: f.type, hint };
+    });
+
     const prompt = `
-You are a mock data generator. 
-Generate exactly ${count} realistic, diverse but matching sets of responses for a form. 
-The form has the following fields:
-${JSON.stringify(fields, null, 2)}
+You are a realistic mock form-response generator.
 
-Context/Theme for the responses: "${context || 'General realistic answers'}"
+Generate exactly ${count} diverse, realistic sets of form responses.
 
-Output exactly a single JSON array of objects. 
-Each object in the array must represent one person's full response.
-The keys in the object MUST exactly match the "name" property of the fields (e.g. "entry.123456").
-If a field is a radio, checkbox, or dropdown, choose realistic options. If the field is a text area, provide an appropriate paragraph.
+Persona / context for respondents: "${context || 'General realistic users'}"
 
-Return ONLY the raw JSON array, without any markdown formatting like \`\`\`json.
-`;
+Fields (follow the hint for each field exactly):
+${JSON.stringify(fieldGuide, null, 2)}
 
-    // Fetch from Groq
+Rules:
+- Output ONLY a raw JSON array of ${count} objects — no markdown, no preamble.
+- Each object's keys must exactly match the "name" values above (e.g. "entry.123456").
+- For checkbox / checkbox_grid fields, the value must be a JSON array of strings.
+- For date fields use YYYY-MM-DD. For time fields use HH:MM (24-hour).
+- For linear_scale / rating fields use a plain integer (as a string is fine).
+- Vary answers realistically across the ${count} responses.
+`.trim();
+
     const chatCompletion = await groq.chat.completions.create({
       messages: [{ role: 'user', content: prompt }],
       model: 'llama-3.3-70b-versatile',
-      temperature: 0.8,
+      temperature: 0.85,
     });
 
-    let content = chatCompletion.choices[0]?.message?.content || '[]';
-    // Clean up potential markdown formatting if the model still includes it
+    let content = chatCompletion.choices[0]?.message?.content ?? '[]';
     content = content.replace(/```json/g, '').replace(/```/g, '').trim();
 
     let generatedData: any[];
     try {
       generatedData = JSON.parse(content);
-    } catch (e) {
+    } catch {
       console.error('Groq returned invalid JSON:', content);
-      return NextResponse.json({ error: 'LLM returned invalid JSON. Try generating fewer responses or adjusting the context.' }, { status: 500 });
+      return NextResponse.json({ error: 'LLM returned invalid JSON. Try fewer responses or a simpler context.' }, { status: 500 });
     }
 
     if (!Array.isArray(generatedData)) {
-      return NextResponse.json({ error: 'LLM did not return a JSON array as requested.' }, { status: 500 });
+      return NextResponse.json({ error: 'LLM did not return a JSON array.' }, { status: 500 });
     }
 
-    // Prepare QStash payload
-    const protocol = req.headers.get('x-forwarded-proto') || 'https';
-    const host = req.headers.get('host');
+    const protocol = req.headers.get('x-forwarded-proto') ?? 'https';
+    const host     = req.headers.get('host');
     const submitUrl = `${protocol}://${host}/api/submit`;
 
     const qstash = new Client({ token: qstashToken });
+    const maxDelayMinutes = (timeWindowHours ?? 0) * 60;
 
-    const maxDelayMinutes = (timeWindowHours || 0) * 60;
-
-    // Create publish promises
     const promises = generatedData.map((mockData) => {
-      // If timeWindowHours is 0, submit immediately (no delay)
       const delayMinutes = maxDelayMinutes > 0 ? Math.floor(Math.random() * maxDelayMinutes) : 0;
-
-      const payload: any = {
-        url: submitUrl,
-        body: { formUrl, data: mockData, fbzx }
-      };
-
-      if (delayMinutes > 0) {
-        payload.delay = `${delayMinutes}m`;
-      }
-
+      const payload: any = { url: submitUrl, body: { formUrl, data: mockData, fbzx } };
+      if (delayMinutes > 0) payload.delay = `${delayMinutes}m`;
       return qstash.publishJSON(payload);
     });
 
-    // We chunk the requests to avoid hitting rate limits or taking up too much memory all at once.
-    // However, Upstash is pretty fast. We will just execute them in parallel chunks.
     const chunkSize = 10;
     for (let i = 0; i < promises.length; i += chunkSize) {
       await Promise.all(promises.slice(i, i + chunkSize));
@@ -107,11 +106,11 @@ Return ONLY the raw JSON array, without any markdown formatting like \`\`\`json.
     return NextResponse.json({
       success: true,
       message: `Successfully generated and scheduled ${generatedData.length} responses.`,
-      scheduledCount: generatedData.length
+      scheduledCount: generatedData.length,
     });
 
   } catch (error: any) {
-    console.error('Error generating and scheduling:', error);
+    console.error('Error in generate-and-schedule:', error);
     return NextResponse.json({ error: error.message || 'Server error' }, { status: 500 });
   }
 }
