@@ -1,5 +1,5 @@
 import { NextResponse } from 'next/server';
-import { GoogleGenerativeAI } from '@google/generative-ai';
+import Groq from 'groq-sdk';
 import { Client } from '@upstash/qstash';
 
 export async function POST(req: Request) {
@@ -11,15 +11,14 @@ export async function POST(req: Request) {
       return NextResponse.json({ error: 'Missing required configuration parameters.' }, { status: 400 });
     }
 
-    const geminiKey = process.env.GOOGLE_AI_API_KEY;
+    const groqKey  = process.env.GROQ_API_KEY;
     const qstashToken = process.env.QSTASH_TOKEN;
 
-    if (!geminiKey || !qstashToken) {
+    if (!groqKey || !qstashToken) {
       return NextResponse.json({ error: 'Missing API keys.' }, { status: 500 });
     }
 
-    const genAI = new GoogleGenerativeAI(geminiKey);
-    const model = genAI.getGenerativeModel({ model: 'gemini-2.0-flash' });
+    const groq = new Groq({ apiKey: groqKey });
 
     // Build a human-readable field guide so the LLM knows exactly what format each type needs
     const fieldGuide = fields.map((f: any) => {
@@ -56,7 +55,7 @@ Fields (follow the hint for each field exactly):
 ${JSON.stringify(fieldGuide, null, 2)}
 
 Rules:
-- Output ONLY a raw JSON array of ${count} objects — no markdown, no preamble, no backticks.
+- Output ONLY a raw JSON array of ${count} objects — no markdown, no preamble.
 - Each object's keys must exactly match the "name" values above (e.g. "entry.123456").
 - For checkbox / checkbox_grid fields, the value must be a JSON array of strings.
 - For date fields use YYYY-MM-DD. For time fields use HH:MM (24-hour).
@@ -64,22 +63,25 @@ Rules:
 - Vary answers realistically across the ${count} responses.
 `.trim();
 
-    const result = await model.generateContent(prompt);
-    let content = result.response.text();
+    const chatCompletion = await groq.chat.completions.create({
+      messages: [{ role: 'user', content: prompt }],
+      model: 'llama-3.3-70b-versatile',
+      temperature: 0.85,
+    });
 
-    // Strip markdown fences if Gemini includes them
+    let content = chatCompletion.choices[0]?.message?.content ?? '[]';
     content = content.replace(/```json/g, '').replace(/```/g, '').trim();
 
     let generatedData: any[];
     try {
       generatedData = JSON.parse(content);
     } catch {
-      console.error('Gemini returned invalid JSON:', content);
-      return NextResponse.json({ error: 'AI returned invalid JSON. Try fewer responses or a simpler context.' }, { status: 500 });
+      console.error('Groq returned invalid JSON:', content);
+      return NextResponse.json({ error: 'LLM returned invalid JSON. Try fewer responses or a simpler context.' }, { status: 500 });
     }
 
     if (!Array.isArray(generatedData)) {
-      return NextResponse.json({ error: 'AI did not return a JSON array.' }, { status: 500 });
+      return NextResponse.json({ error: 'LLM did not return a JSON array.' }, { status: 500 });
     }
 
     const protocol = req.headers.get('x-forwarded-proto') ?? 'https';
