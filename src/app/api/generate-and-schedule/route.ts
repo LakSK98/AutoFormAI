@@ -19,7 +19,7 @@ export async function POST(req: Request) {
     }
 
     const genAI = new GoogleGenerativeAI(geminiKey);
-    const model = genAI.getGenerativeModel({ model: 'gemini-1.5-flash' });
+    const model = genAI.getGenerativeModel({ model: 'gemini-2.0-flash' });
 
     // Build a human-readable field guide so the LLM knows exactly what format each type needs
     const fieldGuide = fields.map((f: any) => {
