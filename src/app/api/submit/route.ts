@@ -9,7 +9,6 @@ export async function POST(req: Request) {
       return NextResponse.json({ error: 'Missing formUrl or data' }, { status: 400 });
     }
 
-    // ✅ Deduplicate fields by name — keeps first occurrence (correct pageIndex preserved)
     const seenNames = new Set<string>();
     const dedupedFields = Array.isArray(fields)
       ? (fields as any[]).filter((f) => {
@@ -23,15 +22,14 @@ export async function POST(req: Request) {
       (f: any) => typeof f.pageIndex === 'number' && f.pageIndex > 0
     );
 
+    // Single Page Submission
     if (!hasPages) {
       const result = await submitPage(formUrl, data, fbzx, null, 0, false, null, dedupedFields);
-      if (!result.success) {
-        return NextResponse.json({ error: result.error }, { status: 500 });
-      }
+      if (!result.success) return NextResponse.json({ error: result.error }, { status: 500 });
       return NextResponse.json({ success: true, message: 'Submitted successfully.' });
     }
 
-    // Build page → field names map from deduplicated fields
+    // Multi-Page Submission
     const pageMap: Record<number, string[]> = {};
     for (const field of dedupedFields) {
       const pg = field.pageIndex ?? 0;
@@ -40,22 +38,18 @@ export async function POST(req: Request) {
     }
 
     const sortedPages = Object.keys(pageMap).map(Number).sort((a, b) => a - b);
-    
-    // State trackers for multi-page forms
     let cookies: string | null = null;
     let currentFbzx: string | null = fbzx || null;
     let draftResponse: string | null = null;
 
     for (let i = 0; i < sortedPages.length; i++) {
-      const pageIndex  = sortedPages[i];
+      const pageIndex = sortedPages[i];
       const isLastPage = i === sortedPages.length - 1;
 
       const pageData: Record<string, any> = {};
       for (const name of pageMap[pageIndex]) {
         if (data[name] !== undefined) pageData[name] = data[name];
       }
-
-      console.log(`Submitting page ${pageIndex}, fields:`, Object.keys(pageData));
 
       const result = await submitPage(
         formUrl,
@@ -69,23 +63,17 @@ export async function POST(req: Request) {
       );
 
       if (!result.success) {
-        return NextResponse.json(
-          { error: `Failed on page ${pageIndex}: ${result.error}` },
-          { status: 500 }
-        );
+        return NextResponse.json({ error: `Failed on page ${pageIndex}: ${result.error}` }, { status: 500 });
       }
 
-      // Update state for the next page iteration
-      if (result.cookies) cookies = result.cookies;
-      if (result.draftResponse) draftResponse = result.draftResponse;
-      if (result.fbzx) currentFbzx = result.fbzx;
+      cookies = result.cookies || null;
+      draftResponse = result.draftResponse || null;
+      currentFbzx = result.fbzx || null;
     }
 
     return NextResponse.json({ success: true, message: 'All pages submitted successfully.' });
-
   } catch (error: any) {
-    console.error('Error submitting to Google Forms:', error);
-    return NextResponse.json({ error: error.message || 'Server error during submission' }, { status: 500 });
+    return NextResponse.json({ error: error.message || 'Server error' }, { status: 500 });
   }
 }
 
@@ -103,19 +91,25 @@ async function submitPage(
   const params = new URLSearchParams();
 
   if (fbzx) params.append('fbzx', fbzx);
-  if (draftResponse) params.append('draftResponse', draftResponse); // 👈 Critical for multi-page state
-
+  if (draftResponse) params.append('draftResponse', draftResponse || "");
+  
   params.append('fvv', '1');
+  // pageHistory must include all pages visited including the current one
   params.append('pageHistory', Array.from({ length: pageIndex + 1 }, (_, i) => i).join(','));
-  if (hasNextPage) params.append('continue', '1');
+  
+  if (hasNextPage) {
+    params.append('continue', '1');
+  }
 
+  // Improved Field Mapping
   for (const key of Object.keys(data)) {
     const value = data[key];
     const fieldMeta = allFields.find((f: any) => f.name === key);
     const fieldType = fieldMeta?.type ?? '';
 
+    // Handle Checkboxes and Grids (Repeat the key for each value)
     if (Array.isArray(value)) {
-      if (fieldType === 'radio_grid') {
+      if (fieldType === 'radio_grid' || fieldType === 'radio') {
         params.append(key, String(value[0]));
       } else {
         value.forEach((v) => params.append(key, String(v)));
@@ -125,20 +119,20 @@ async function submitPage(
 
     const strVal = String(value);
 
-    // Date
+    // Date Support
     if (/^\d{4}-\d{2}-\d{2}$/.test(strVal)) {
-      const [year, month, day] = strVal.split('-');
-      params.append(`${key}_year`,  year);
-      params.append(`${key}_month`, String(parseInt(month, 10)));
-      params.append(`${key}_day`,   String(parseInt(day,   10)));
+      const [y, m, d] = strVal.split('-');
+      params.append(`${key}_year`, y);
+      params.append(`${key}_month`, String(parseInt(m)));
+      params.append(`${key}_day`, String(parseInt(d)));
       continue;
     }
 
-    // Time
+    // Time Support
     if (/^\d{1,2}:\d{2}$/.test(strVal)) {
-      const [hour, minute] = strVal.split(':');
-      params.append(`${key}_hour`,   String(parseInt(hour,   10)));
-      params.append(`${key}_minute`, String(parseInt(minute, 10)));
+      const [h, min] = strVal.split(':');
+      params.append(`${key}_hour`, String(parseInt(h)));
+      params.append(`${key}_minute`, String(parseInt(min)));
       continue;
     }
 
@@ -147,51 +141,57 @@ async function submitPage(
 
   const headers: Record<string, string> = {
     'Content-Type': 'application/x-www-form-urlencoded',
-    'User-Agent':   'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-    'Referer':      formUrl.replace('/formResponse', '/viewform'),
-    'Origin':       'https://docs.google.com',
+    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+    'Referer': formUrl.replace('/formResponse', '/viewform'),
   };
 
   if (incomingCookies) headers['Cookie'] = incomingCookies;
 
   const response = await fetch(formUrl, {
-    method:   'POST',
+    method: 'POST',
     headers,
-    body:     params.toString(),
-    redirect: 'manual', // Prevents aggressive redirects on final submission
+    body: params.toString(),
+    redirect: 'manual',
   });
 
+  // Check if we hit a redirect (common for successful final submission)
   if (response.status >= 400) {
-    return { success: false, error: `HTTP ${response.status}` };
+    return { success: false, error: `Google rejected request with status ${response.status}` };
   }
 
   const setCookie = response.headers.get('set-cookie');
-  const newCookies = setCookie
-    ? setCookie.split(',').map(c => c.split(';')[0].trim()).join('; ')
+  const newCookies = setCookie 
+    ? setCookie.split(',').map(c => c.split(';')[0].trim()).join('; ') 
     : incomingCookies;
 
   let nextDraftResponse = draftResponse;
   let nextFbzx = fbzx;
 
-  // 👈 Extract updated draftResponse and fbzx from the intermediate HTML response
-  if (hasNextPage && response.status === 200) {
-    const html = await response.text();
-    
+  const html = await response.text();
+  
+  // Validation: If we are not on the last page, we MUST find a new draftResponse
+  if (hasNextPage) {
     const draftMatch = html.match(/name="draftResponse" value="(.*?)"/);
     if (draftMatch && draftMatch[1]) {
-      nextDraftResponse = draftMatch[1].replace(/&quot;/g, '"'); 
+      nextDraftResponse = draftMatch[1].replace(/&quot;/g, '"');
+    } else {
+      // If no draftResponse found on intermediate page, Google likely flagged a validation error
+      return { success: false, error: "Validation error: Google did not advance to the next page. Check required fields." };
     }
 
     const fbzxMatch = html.match(/name="fbzx" value="(.*?)"/);
-    if (fbzxMatch && fbzxMatch[1]) {
-      nextFbzx = fbzxMatch[1];
+    if (fbzxMatch && fbzxMatch[1]) nextFbzx = fbzxMatch[1];
+  } else {
+    // Final Page Check: Look for the confirmation message
+    if (!html.includes('recorded') && !html.includes('sent') && response.status !== 302) {
+      return { success: false, error: "Form may not have submitted correctly. Success message not found." };
     }
   }
 
   return { 
     success: true, 
-    cookies: newCookies,
-    draftResponse: nextDraftResponse,
-    fbzx: nextFbzx
+    cookies: newCookies, 
+    draftResponse: nextDraftResponse, 
+    fbzx: nextFbzx 
   };
 }
