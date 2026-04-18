@@ -18,10 +18,20 @@ export async function POST(req: Request) {
       return NextResponse.json({ error: 'Missing API keys.' }, { status: 500 });
     }
 
+    // ✅ Deduplicate fields by name before building the LLM prompt
+    // Prevents the LLM from receiving duplicate entry IDs which causes
+    // repeated keys in generated JSON and a 400 from Google on submission
+    const seenNames = new Set<string>();
+    const dedupedFields = (fields as any[]).filter((f: any) => {
+      if (seenNames.has(f.name)) return false;
+      seenNames.add(f.name);
+      return true;
+    });
+
     const groq = new Groq({ apiKey: groqKey });
 
     // Build per-field hint so the LLM knows exact format for every type
-    const fieldGuide = fields.map((f: any) => {
+    const fieldGuide = dedupedFields.map((f: any) => {
       let hint = '';
       switch (f.type) {
         case 'text':         hint = 'Short text answer.'; break;
@@ -102,7 +112,7 @@ Rules:
           formUrl,
           data: mockData,
           fbzx,
-          fields,   // ← passed so submit route can group by pageIndex
+          fields: dedupedFields, // ✅ Always pass deduplicated fields to submit route
         },
       };
 
