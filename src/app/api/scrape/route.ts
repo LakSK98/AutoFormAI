@@ -68,12 +68,15 @@ export async function POST(req: Request) {
           const typeCode: number = q[3];
           const type = TYPE_MAP[typeCode] ?? 'text';
 
-          // Page break: typeCode 6 with no entry array
-          if (typeCode === 6 && q[4] === null) {
-            currentPage++;
-            continue;
-          }
-
+          if (typeCode === 6) {
+  // Index [7] in the question array = 1 means "go to page" / actual page break
+  // A plain section header has no [7] or [7] = 0
+  const isPageBreak = q[7] === 1 || q[4] === null || !Array.isArray(q[4]) || q[4].length === 0;
+  if (isPageBreak) {
+    currentPage++;
+  }
+  continue;
+}
           if (['title_description', 'file_upload', 'image'].includes(type)) continue;
 
           const entryArr = q[4];
