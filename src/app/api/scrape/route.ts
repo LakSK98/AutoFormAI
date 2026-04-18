@@ -68,15 +68,13 @@ export async function POST(req: Request) {
           const typeCode: number = q[3];
           const type = TYPE_MAP[typeCode] ?? 'text';
 
+          // ✅ Always increment page on any type-6 element (page break or section header)
+          // Google Forms uses type-6 consistently for page breaks in multi-page forms
           if (typeCode === 6) {
-  // Index [7] in the question array = 1 means "go to page" / actual page break
-  // A plain section header has no [7] or [7] = 0
-  const isPageBreak = q[7] === 1 || q[4] === null || !Array.isArray(q[4]) || q[4].length === 0;
-  if (isPageBreak) {
-    currentPage++;
-  }
-  continue;
-}
+            currentPage++;
+            continue;
+          }
+
           if (['title_description', 'file_upload', 'image'].includes(type)) continue;
 
           const entryArr = q[4];
@@ -225,6 +223,14 @@ export async function POST(req: Request) {
       });
     }
 
+    // ✅ Deduplicate fields by name — keeps first occurrence (correct pageIndex)
+    const seenNames = new Set<string>();
+    const dedupedFields = fields.filter((f) => {
+      if (seenNames.has(f.name)) return false;
+      seenNames.add(f.name);
+      return true;
+    });
+
     const fbzxMatch = html.match(/name="fbzx" value="(.*?)"/);
     const fbzx = fbzxMatch ? fbzxMatch[1] : '';
 
@@ -237,14 +243,17 @@ export async function POST(req: Request) {
       return NextResponse.json({ error: 'This form requires login. Please make it public.' }, { status: 403 });
     }
 
-    if (fields.length === 0 && !html.includes('entry.')) {
+    if (dedupedFields.length === 0 && !html.includes('entry.')) {
       return NextResponse.json({ error: 'No fields found. Check the URL and ensure the form is public.' }, { status: 404 });
     }
 
-    const pageCount = Math.max(...fields.map(f => f.pageIndex), 0) + 1;
+    const pageCount = Math.max(...dedupedFields.map(f => f.pageIndex), 0) + 1;
     const submitUrl = viewUrl.replace('/viewform', '/formResponse');
 
-    return NextResponse.json({ title: formTitle, submitUrl, fields, fbzx, pageCount });
+    console.log(`Scraped form: "${formTitle}", ${dedupedFields.length} fields, ${pageCount} pages`);
+    dedupedFields.forEach(f => console.log(`  [page ${f.pageIndex}] ${f.name} (${f.type}) — ${f.title}`));
+
+    return NextResponse.json({ title: formTitle, submitUrl, fields: dedupedFields, fbzx, pageCount });
 
   } catch (error: any) {
     console.error('Error scraping form:', error);
