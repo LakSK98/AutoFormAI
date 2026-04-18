@@ -4,6 +4,58 @@ import { Client } from '@upstash/qstash';
 
 type FieldIntent = 'positive' | 'negative' | 'random';
 
+// ── Supported override values and what they resolve to ───────────────────────
+// These are the keywords users can write after entry.XXXXXXX= in context.
+// Matched case-insensitively. Add more aliases here as needed.
+const OVERRIDE_VALUE_MAP: Record<string, string[]> = {
+  strongly_disagree: ['Strongly Disagree'],
+  disagree:          ['Disagree'],
+  neutral:           ['Neutral'],
+  agree:             ['Agree'],
+  strongly_agree:    ['Strongly Agree'],
+  // Scale shortcuts — will use the field's actual low/high at runtime
+  min:               ['__MIN__'],
+  max:               ['__MAX__'],
+  random:            ['__RANDOM__'],
+};
+
+// ── Parse "Field overrides:" block from context string ───────────────────────
+// Supports both formats in the context text:
+//   Field overrides: entry.123=strongly_disagree, entry.456=agree
+//   Field overrides:
+//     entry.123=strongly_disagree
+//     entry.456=random
+//
+// Returns a map of { "entry.123456": "Strongly Disagree" } (resolved values)
+function parseFieldOverrides(context: string): Record<string, string | '__MIN__' | '__MAX__' | '__RANDOM__'> {
+  const overrides: Record<string, string> = {};
+
+  // Find the "Field overrides:" section — grab everything after it
+  const sectionMatch = context.match(/field\s+overrides\s*:([\s\S]*?)(?:\n\n|\n[A-Z]|$)/i);
+  if (!sectionMatch) return overrides;
+
+  const section = sectionMatch[1];
+
+  // Match every entry.XXXXXXX=value pair in that section
+  const pairRegex = /(entry\.\d+)\s*=\s*([a-z_]+)/gi;
+  let match: RegExpExecArray | null;
+
+  while ((match = pairRegex.exec(section)) !== null) {
+    const entryId  = match[1].toLowerCase().replace('entry.', '');
+    const keyword  = match[2].toLowerCase();
+    const name     = `entry.${entryId}`;
+    const resolved = OVERRIDE_VALUE_MAP[keyword];
+
+    if (resolved) {
+      overrides[name] = resolved[0]; // store the display string or sentinel
+    } else {
+      console.warn(`Unknown override keyword "${keyword}" for ${name} — skipping`);
+    }
+  }
+
+  return overrides;
+}
+
 export async function POST(req: Request) {
   try {
     const body = await req.json();
@@ -29,18 +81,31 @@ export async function POST(req: Request) {
 
     const groq = new Groq({ apiKey: groqKey });
 
-    // ── Step 1: Single LLM call — classify intents AND detect excluded options ────
-    // Combining both tasks into one call saves a round-trip and gives the model
-    // full context to make both decisions together.
+    // ── Step 1: Parse hard overrides from context ─────────────────────────────────
+    // These bypass the LLM entirely — 100% deterministic.
+    const hardOverrides = parseFieldOverrides(context ?? '');
+    console.log('Hard overrides parsed from context:', hardOverrides);
 
-    const fieldTitleList = dedupedFields.map((f: any) => ({
+    // ── Step 2: LLM classification for everything else ────────────────────────────
+    // Exclude hard-overridden fields from classification — no point asking the LLM
+    // about fields we've already decided.
+    const fieldsToClassify = dedupedFields.filter(
+      (f: any) => !(f.name in hardOverrides)
+    );
+
+    const fieldTitleList = fieldsToClassify.map((f: any) => ({
       name:    f.name,
       title:   f.title,
       type:    f.type,
       options: f.options ?? [],
     }));
 
-    const classifyPrompt = `
+    const intentMap: Record<string, FieldIntent> = {};
+    for (const f of dedupedFields) intentMap[f.name] = 'positive';
+    let excludedOptions: string[] = [];
+
+    if (fieldTitleList.length > 0) {
+      const classifyPrompt = `
 You are analyzing a survey form's context instructions to:
 1. Classify how each field should be answered (intent).
 2. Identify any specific option values that must NEVER be selected for any field.
@@ -50,79 +115,59 @@ Context instructions provided for this form:
 ${context || ''}
 """
 
-Here are all the form fields with their available options:
+Here are the form fields to classify (fields with explicit overrides have been excluded):
 ${JSON.stringify(fieldTitleList, null, 2)}
 
 TASK 1 — Intent classification:
 For each field assign one of:
-- "positive"  → should receive positive/agree/high-value responses (default if unspecified)
-- "negative"  → should receive negative/disagree/low-value responses
-- "random"    → should be varied, neutral, or randomly distributed
+- "positive"  → positive/agree/high-value responses (default if unspecified)
+- "negative"  → negative/disagree/low-value responses
+- "random"    → varied, neutral, or randomly distributed
 
 TASK 2 — Excluded options:
-List any specific option strings that must NEVER be selected across ANY field.
-Examples: "Prefer not to say", "Not applicable", "Other", etc.
-Only include options that the context explicitly says to avoid.
-If none, return an empty array.
-
-IMPORTANT matching rule for TASK 1:
-- Grid questions have titles like "Section Name → Row statement".
-- Match the row statement part against the context description, not the full title.
-- If the context says to answer negatively for a statement, find ALL grid rows whose 
-  row text semantically matches that statement, even if phrased slightly differently.
+List any specific option strings that must NEVER be selected (e.g. "Prefer not to say").
+Return empty array if none.
 
 Return ONLY a raw JSON object in exactly this shape. No markdown, no explanation:
 {
   "intents": {
     "entry.123456": "positive",
-    "entry.789012": "negative",
-    "entry.345678": "random"
+    "entry.789012": "negative"
   },
-  "excludedOptions": ["Prefer not to say", "Not applicable"]
+  "excludedOptions": ["Prefer not to say"]
 }
 `.trim();
 
-    const classifyCompletion = await groq.chat.completions.create({
-      messages: [{ role: 'user', content: classifyPrompt }],
-      model: 'llama-3.3-70b-versatile',
-      temperature: 0,
-    });
+      const classifyCompletion = await groq.chat.completions.create({
+        messages: [{ role: 'user', content: classifyPrompt }],
+        model: 'llama-3.3-70b-versatile',
+        temperature: 0,
+      });
 
-    let classifyContent = classifyCompletion.choices[0]?.message?.content ?? '{}';
-    classifyContent = classifyContent.replace(/```json/g, '').replace(/```/g, '').trim();
+      let classifyContent = classifyCompletion.choices[0]?.message?.content ?? '{}';
+      classifyContent = classifyContent.replace(/```json/g, '').replace(/```/g, '').trim();
 
-    // Defaults
-    const intentMap: Record<string, FieldIntent> = {};
-    for (const f of dedupedFields) intentMap[f.name] = 'positive';
-    let excludedOptions: string[] = [];
-
-    try {
-      const parsed = JSON.parse(classifyContent);
-
-      // Apply intents
-      if (parsed.intents && typeof parsed.intents === 'object') {
-        for (const [name, intent] of Object.entries(parsed.intents)) {
-          if (['positive', 'negative', 'random'].includes(intent as string)) {
-            intentMap[name] = intent as FieldIntent;
+      try {
+        const parsed = JSON.parse(classifyContent);
+        if (parsed.intents && typeof parsed.intents === 'object') {
+          for (const [name, intent] of Object.entries(parsed.intents)) {
+            if (['positive', 'negative', 'random'].includes(intent as string)) {
+              intentMap[name] = intent as FieldIntent;
+            }
           }
         }
+        if (Array.isArray(parsed.excludedOptions)) {
+          excludedOptions = parsed.excludedOptions.filter((o: any) => typeof o === 'string');
+        }
+      } catch {
+        console.warn('Could not parse classification response, using defaults');
       }
-
-      // Apply excluded options
-      if (Array.isArray(parsed.excludedOptions)) {
-        excludedOptions = parsed.excludedOptions.filter((o: any) => typeof o === 'string');
-      }
-    } catch {
-      console.warn('Could not parse classification response, using defaults:', classifyContent);
     }
 
-    console.log('Field intents:', intentMap);
+    console.log('Field intents from LLM:', intentMap);
     console.log('Excluded options:', excludedOptions);
 
-    // ── Step 2: Strip excluded options from every field's available options ────────
-    // This ensures the LLM never even sees "Prefer not to say" as a valid choice,
-    // and the post-processing enforcer also never picks it.
-
+    // ── Step 3: Strip excluded options from fields ────────────────────────────────
     const cleanedFields = dedupedFields.map((f: any) => {
       if (!Array.isArray(f.options) || excludedOptions.length === 0) return f;
       return {
@@ -135,115 +180,80 @@ Return ONLY a raw JSON object in exactly this shape. No markdown, no explanation
       };
     });
 
-    // ── Step 3: Build per-field hints ─────────────────────────────────────────────
+    // ── Step 4: Build field guide — skip hard-overridden fields ──────────────────
+    const fieldGuide = cleanedFields
+      .filter((f: any) => !(f.name in hardOverrides))
+      .map((f: any) => {
+        const intent: FieldIntent = intentMap[f.name] ?? 'positive';
+        const label = intent.toUpperCase();
 
-    const fieldGuide = cleanedFields.map((f: any) => {
-      const intent: FieldIntent = intentMap[f.name] ?? 'positive';
-      const label = intent.toUpperCase();
+        let hint = '';
+        switch (f.type) {
+          case 'text':
+            hint = intent === 'random' ? 'Short text answer. Vary across respondents.' : 'Short text answer.';
+            break;
+          case 'textarea':
+            hint = intent === 'random' ? 'Paragraph answer. Vary across respondents.' : 'Longer paragraph answer.';
+            break;
+          case 'radio':
+            hint = intent === 'negative'
+              ? `Pick exactly ONE from: ${JSON.stringify(f.options ?? [])}. IMPORTANT [${label}]: pick "Disagree" or "Strongly Disagree".`
+              : intent === 'random'
+              ? `Pick exactly ONE from: ${JSON.stringify(f.options ?? [])}. IMPORTANT [${label}]: distribute randomly.`
+              : `Pick exactly ONE from: ${JSON.stringify(f.options ?? [])}. IMPORTANT [${label}]: pick "Agree" or "Strongly Agree".`;
+            break;
+          case 'dropdown':
+            hint = intent === 'random'
+              ? `Pick exactly ONE from: ${JSON.stringify(f.options ?? [])}. Distribute randomly.`
+              : `Pick exactly ONE from: ${JSON.stringify(f.options ?? [])}.`;
+            break;
+          case 'checkbox':
+            hint = intent === 'negative'
+              ? `Pick one OR MORE from: ${JSON.stringify(f.options ?? [])}. Return as JSON array. IMPORTANT [${label}]: pick only negative options.`
+              : intent === 'random'
+              ? `Pick one OR MORE from: ${JSON.stringify(f.options ?? [])}. Return as JSON array. IMPORTANT [${label}]: vary randomly.`
+              : `Pick one OR MORE from: ${JSON.stringify(f.options ?? [])}. Return as JSON array. IMPORTANT [${label}]: pick positive options.`;
+            break;
+          case 'linear_scale':
+            hint = intent === 'negative'
+              ? `Integer between ${f.low ?? 1} and ${f.high ?? 5}${f.lowLabel ? ` (${f.low}=${f.lowLabel})` : ''}${f.highLabel ? ` (${f.high}=${f.highLabel})` : ''}. IMPORTANT [${label}]: pick LOW value.`
+              : intent === 'random'
+              ? `Integer between ${f.low ?? 1} and ${f.high ?? 5}. IMPORTANT [${label}]: distribute randomly.`
+              : `Integer between ${f.low ?? 1} and ${f.high ?? 5}${f.lowLabel ? ` (${f.low}=${f.lowLabel})` : ''}${f.highLabel ? ` (${f.high}=${f.highLabel})` : ''}. IMPORTANT [${label}]: pick HIGH value.`;
+            break;
+          case 'rating':
+            hint = intent === 'negative'
+              ? `Integer 1–${f.high ?? 5}. IMPORTANT [${label}]: pick 1 or 2.`
+              : intent === 'random'
+              ? `Integer 1–${f.high ?? 5}. IMPORTANT [${label}]: distribute randomly.`
+              : `Integer 1–${f.high ?? 5}. IMPORTANT [${label}]: pick ${f.high ?? 5} or ${Number(f.high ?? 5) - 1}.`;
+            break;
+          case 'radio_grid':
+            hint = intent === 'negative'
+              ? `Pick exactly ONE from: ${JSON.stringify(f.options ?? [])}. IMPORTANT [${label}]: MUST pick "Strongly Disagree" or "Disagree".`
+              : intent === 'random'
+              ? `Pick exactly ONE from: ${JSON.stringify(f.options ?? [])}. IMPORTANT [${label}]: distribute randomly.`
+              : `Pick exactly ONE from: ${JSON.stringify(f.options ?? [])}. IMPORTANT [${label}]: pick "Agree" or "Strongly Agree".`;
+            break;
+          case 'checkbox_grid':
+            hint = intent === 'negative'
+              ? `Pick one OR MORE from: ${JSON.stringify(f.options ?? [])}. Return as JSON array. IMPORTANT [${label}]: pick only "Strongly Disagree" or "Disagree".`
+              : intent === 'random'
+              ? `Pick one OR MORE from: ${JSON.stringify(f.options ?? [])}. Return as JSON array. IMPORTANT [${label}]: vary randomly.`
+              : `Pick one OR MORE from: ${JSON.stringify(f.options ?? [])}. Return as JSON array. IMPORTANT [${label}]: pick positive options.`;
+            break;
+          case 'date':
+            hint = 'Date string in YYYY-MM-DD format.';
+            break;
+          case 'time':
+            hint = 'Time string in HH:MM (24-hour) format.';
+            break;
+          default:
+            hint = 'Text answer.';
+        }
 
-      let hint = '';
-      switch (f.type) {
-        case 'text':
-          hint = intent === 'random'
-            ? 'Short text answer. Vary across respondents.'
-            : 'Short text answer.';
-          break;
-
-        case 'textarea':
-          hint = intent === 'random'
-            ? 'Paragraph answer. Vary sentiment and length across respondents.'
-            : 'Longer paragraph answer.';
-          break;
-
-        case 'radio':
-          if (intent === 'negative') {
-            hint = `Pick exactly ONE from: ${JSON.stringify(f.options ?? [])}. IMPORTANT [${label}]: pick "Disagree" or "Strongly Disagree".`;
-          } else if (intent === 'random') {
-            hint = `Pick exactly ONE from: ${JSON.stringify(f.options ?? [])}. IMPORTANT [${label}]: distribute randomly — do not favour any option.`;
-          } else {
-            hint = `Pick exactly ONE from: ${JSON.stringify(f.options ?? [])}. IMPORTANT [${label}]: pick "Agree" or "Strongly Agree".`;
-          }
-          break;
-
-        case 'dropdown':
-          hint = intent === 'random'
-            ? `Pick exactly ONE from: ${JSON.stringify(f.options ?? [])}. Distribute randomly.`
-            : `Pick exactly ONE from: ${JSON.stringify(f.options ?? [])}.`;
-          break;
-
-        case 'checkbox':
-          if (intent === 'negative') {
-            hint = `Pick one OR MORE from: ${JSON.stringify(f.options ?? [])}. Return as JSON array. IMPORTANT [${label}]: pick only negative options.`;
-          } else if (intent === 'random') {
-            hint = `Pick one OR MORE from: ${JSON.stringify(f.options ?? [])}. Return as JSON array. IMPORTANT [${label}]: vary randomly.`;
-          } else {
-            hint = `Pick one OR MORE from: ${JSON.stringify(f.options ?? [])}. Return as JSON array. IMPORTANT [${label}]: pick positive options.`;
-          }
-          break;
-
-        case 'linear_scale':
-          if (intent === 'negative') {
-            hint = `Integer between ${f.low ?? 1} and ${f.high ?? 5}`
-                 + (f.lowLabel  ? ` (${f.low} = ${f.lowLabel})`  : '')
-                 + (f.highLabel ? ` (${f.high} = ${f.highLabel})` : '')
-                 + `. IMPORTANT [${label}]: pick a LOW value (${f.low ?? 1} or ${Number(f.low ?? 1) + 1}).`;
-          } else if (intent === 'random') {
-            hint = `Integer between ${f.low ?? 1} and ${f.high ?? 5}`
-                 + (f.lowLabel  ? ` (${f.low} = ${f.lowLabel})`  : '')
-                 + (f.highLabel ? ` (${f.high} = ${f.highLabel})` : '')
-                 + `. IMPORTANT [${label}]: distribute randomly across the full range.`;
-          } else {
-            hint = `Integer between ${f.low ?? 1} and ${f.high ?? 5}`
-                 + (f.lowLabel  ? ` (${f.low} = ${f.lowLabel})`  : '')
-                 + (f.highLabel ? ` (${f.high} = ${f.highLabel})` : '')
-                 + `. IMPORTANT [${label}]: pick a HIGH value (${f.high ?? 5} or ${Number(f.high ?? 5) - 1}).`;
-          }
-          break;
-
-        case 'rating':
-          if (intent === 'negative') {
-            hint = `Integer between 1 and ${f.high ?? 5}. IMPORTANT [${label}]: pick 1 or 2.`;
-          } else if (intent === 'random') {
-            hint = `Integer between 1 and ${f.high ?? 5}. IMPORTANT [${label}]: distribute randomly.`;
-          } else {
-            hint = `Integer between 1 and ${f.high ?? 5}. IMPORTANT [${label}]: pick ${f.high ?? 5} or ${Number(f.high ?? 5) - 1}.`;
-          }
-          break;
-
-        case 'radio_grid':
-          if (intent === 'negative') {
-            hint = `Pick exactly ONE from: ${JSON.stringify(f.options ?? [])}. IMPORTANT [${label}]: MUST pick "Strongly Disagree" or "Disagree". Never pick Agree or Strongly Agree.`;
-          } else if (intent === 'random') {
-            hint = `Pick exactly ONE from: ${JSON.stringify(f.options ?? [])}. IMPORTANT [${label}]: distribute randomly.`;
-          } else {
-            hint = `Pick exactly ONE from: ${JSON.stringify(f.options ?? [])}. IMPORTANT [${label}]: pick "Agree" or "Strongly Agree".`;
-          }
-          break;
-
-        case 'checkbox_grid':
-          if (intent === 'negative') {
-            hint = `Pick one OR MORE from: ${JSON.stringify(f.options ?? [])}. Return as JSON array. IMPORTANT [${label}]: pick only "Strongly Disagree" or "Disagree".`;
-          } else if (intent === 'random') {
-            hint = `Pick one OR MORE from: ${JSON.stringify(f.options ?? [])}. Return as JSON array. IMPORTANT [${label}]: vary randomly.`;
-          } else {
-            hint = `Pick one OR MORE from: ${JSON.stringify(f.options ?? [])}. Return as JSON array. IMPORTANT [${label}]: pick positive options.`;
-          }
-          break;
-
-        case 'date':
-          hint = 'Date string in YYYY-MM-DD format.';
-          break;
-
-        case 'time':
-          hint = 'Time string in HH:MM (24-hour) format.';
-          break;
-
-        default:
-          hint = 'Text answer.';
-      }
-
-      return { name: f.name, title: f.title, type: f.type, intent, hint };
-    });
+        return { name: f.name, title: f.title, type: f.type, intent, hint };
+      });
 
     const overrideLines = fieldGuide
       .filter(f => f.intent !== 'positive')
@@ -254,11 +264,10 @@ Return ONLY a raw JSON object in exactly this shape. No markdown, no explanation
       : '';
 
     const excludedCallout = excludedOptions.length > 0
-      ? `\nNEVER select these options for any field under any circumstances: ${JSON.stringify(excludedOptions)}\n`
+      ? `\nNEVER select these options for any field: ${JSON.stringify(excludedOptions)}\n`
       : '';
 
-    // ── Step 4: Generate responses ────────────────────────────────────────────────
-
+    // ── Step 5: Generate responses for non-overridden fields ──────────────────────
     const prompt = `
 You are a realistic mock form-response generator.
 
@@ -278,7 +287,6 @@ Rules:
 - For radio_grid the value must be a plain string.
 - For date use YYYY-MM-DD. For time use HH:MM (24-hour).
 - For linear_scale / rating use a plain integer (string is fine).
-- Respect every [POSITIVE], [NEGATIVE], [RANDOM] label exactly.
 - NEVER use any of these options: ${JSON.stringify(excludedOptions)}.
 `.trim();
 
@@ -296,20 +304,19 @@ Rules:
       generatedData = JSON.parse(content);
     } catch {
       console.error('Groq returned invalid JSON:', content);
-      return NextResponse.json({ error: 'LLM returned invalid JSON. Try fewer responses or a simpler context.' }, { status: 500 });
+      return NextResponse.json({ error: 'LLM returned invalid JSON.' }, { status: 500 });
     }
 
     if (!Array.isArray(generatedData)) {
       return NextResponse.json({ error: 'LLM did not return a JSON array.' }, { status: 500 });
     }
 
-    // ── Step 5: Post-processing enforcement ───────────────────────────────────────
+    // ── Step 6: Inject hard overrides + enforce negative fields ───────────────────
 
     const findMostNegative = (options: string[]): string | undefined =>
       options.find(o => /strongly.{0,5}disagree/i.test(o))
       ?? options.find(o => /disagree/i.test(o))
       ?? options.find(o => /never/i.test(o))
-      ?? options.find(o => /poor/i.test(o))
       ?? options[0];
 
     const findMostPositive = (options: string[]): string | undefined =>
@@ -322,44 +329,70 @@ Rules:
       excludedOptions.some(ex => ex.toLowerCase().trim() === value.toLowerCase().trim());
 
     for (const row of generatedData) {
+
+      // Inject hard overrides for every row — completely deterministic
+      for (const [entryName, rawValue] of Object.entries(hardOverrides)) {
+        const fieldMeta = cleanedFields.find((f: any) => f.name === entryName);
+        const opts: string[] = fieldMeta?.options ?? [];
+        const type: string   = fieldMeta?.type ?? '';
+        let resolvedValue: string | string[];
+
+        if (rawValue === '__MIN__') {
+          resolvedValue = String(fieldMeta?.low ?? 1);
+        } else if (rawValue === '__MAX__') {
+          resolvedValue = String(fieldMeta?.high ?? 5);
+        } else if (rawValue === '__RANDOM__') {
+          const available = opts.filter(o => !isExcluded(o));
+          resolvedValue = available.length > 0
+            ? available[Math.floor(Math.random() * available.length)]
+            : opts[0] ?? '';
+        } else {
+          // Find the closest matching option in the field's actual options list
+          // so casing differences between "Strongly Disagree" vs "strongly disagree" don't matter
+          const matched = opts.find(o => o.toLowerCase().trim() === rawValue.toLowerCase().trim());
+          resolvedValue = matched ?? rawValue;
+        }
+
+        // Apply as array for checkbox types, string for everything else
+        if (type === 'checkbox' || type === 'checkbox_grid') {
+          row[entryName] = Array.isArray(resolvedValue) ? resolvedValue : [resolvedValue];
+        } else {
+          row[entryName] = Array.isArray(resolvedValue) ? resolvedValue[0] : resolvedValue;
+        }
+      }
+
+      // LLM-classified negative fields — enforce via post-processing
       for (const field of fieldGuide) {
+        if (field.intent !== 'negative') continue;
         const key = field.name;
         if (!(key in row)) continue;
 
-        const originalField = cleanedFields.find((f: any) => f.name === key);
-        const opts: string[] = originalField?.options ?? [];
+        const opts: string[] = cleanedFields.find((f: any) => f.name === key)?.options ?? [];
 
-        // Hard-enforce negative fields
-        if (field.intent === 'negative') {
-          if (field.type === 'radio_grid' || field.type === 'radio') {
-            const negOpt = findMostNegative(opts);
-            if (negOpt) row[key] = negOpt;
-          } else if (field.type === 'checkbox_grid' || field.type === 'checkbox') {
-            const negOpt = findMostNegative(opts);
-            if (negOpt) row[key] = [negOpt];
-          } else if (field.type === 'linear_scale' || field.type === 'rating') {
-            row[key] = String(originalField?.low ?? 1);
-          }
-          continue;
+        if (field.type === 'radio_grid' || field.type === 'radio') {
+          const negOpt = findMostNegative(opts);
+          if (negOpt) row[key] = negOpt;
+        } else if (field.type === 'checkbox_grid' || field.type === 'checkbox') {
+          const negOpt = findMostNegative(opts);
+          if (negOpt) row[key] = [negOpt];
+        } else if (field.type === 'linear_scale' || field.type === 'rating') {
+          row[key] = String(cleanedFields.find((f: any) => f.name === key)?.low ?? 1);
         }
+      }
 
-        // For all fields: replace any excluded option with the appropriate fallback
+      // Remove any excluded options that slipped through
+      for (const field of fieldGuide) {
+        const key = field.name;
+        if (!(key in row)) continue;
+        const opts: string[] = cleanedFields.find((f: any) => f.name === key)?.options ?? [];
+
         const currentValue = row[key];
         if (typeof currentValue === 'string' && isExcluded(currentValue)) {
-          if (field.intent === 'random') {
-            // Pick any non-excluded option randomly
-            const available = opts.filter(o => !isExcluded(o));
-            if (available.length > 0) {
-              row[key] = available[Math.floor(Math.random() * available.length)];
-            }
-          } else {
-            // Positive — pick the most positive non-excluded option
-            const available = opts.filter(o => !isExcluded(o));
-            row[key] = findMostPositive(available) ?? available[0] ?? currentValue;
-          }
+          const available = opts.filter(o => !isExcluded(o));
+          row[key] = field.intent === 'random'
+            ? available[Math.floor(Math.random() * available.length)] ?? currentValue
+            : findMostPositive(available) ?? available[0] ?? currentValue;
         }
-
-        // Same for array values (checkbox / checkbox_grid)
         if (Array.isArray(currentValue)) {
           row[key] = currentValue.filter((v: string) => !isExcluded(v));
           if (row[key].length === 0) {
@@ -370,7 +403,7 @@ Rules:
       }
     }
 
-    // ── Step 6: Schedule via QStash ───────────────────────────────────────────────
+    // ── Step 7: Schedule via QStash ───────────────────────────────────────────────
 
     const protocol  = req.headers.get('x-forwarded-proto') ?? 'https';
     const host      = req.headers.get('host');
