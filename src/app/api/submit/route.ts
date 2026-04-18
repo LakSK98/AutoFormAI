@@ -24,7 +24,7 @@ export async function POST(req: Request) {
     );
 
     if (!hasPages) {
-      const result = await submitPage(formUrl, data, fbzx, 0, false, null, dedupedFields);
+      const result = await submitPage(formUrl, data, fbzx, null, 0, false, null, dedupedFields);
       if (!result.success) {
         return NextResponse.json({ error: result.error }, { status: 500 });
       }
@@ -40,7 +40,11 @@ export async function POST(req: Request) {
     }
 
     const sortedPages = Object.keys(pageMap).map(Number).sort((a, b) => a - b);
+    
+    // State trackers for multi-page forms
     let cookies: string | null = null;
+    let currentFbzx: string | null = fbzx || null;
+    let draftResponse: string | null = null;
 
     for (let i = 0; i < sortedPages.length; i++) {
       const pageIndex  = sortedPages[i];
@@ -56,7 +60,8 @@ export async function POST(req: Request) {
       const result = await submitPage(
         formUrl,
         pageData,
-        fbzx,
+        currentFbzx,
+        draftResponse,
         pageIndex,
         !isLastPage,
         cookies,
@@ -70,7 +75,10 @@ export async function POST(req: Request) {
         );
       }
 
+      // Update state for the next page iteration
       if (result.cookies) cookies = result.cookies;
+      if (result.draftResponse) draftResponse = result.draftResponse;
+      if (result.fbzx) currentFbzx = result.fbzx;
     }
 
     return NextResponse.json({ success: true, message: 'All pages submitted successfully.' });
@@ -85,15 +93,18 @@ async function submitPage(
   formUrl: string,
   data: Record<string, any>,
   fbzx: string | null,
+  draftResponse: string | null,
   pageIndex: number,
   hasNextPage: boolean,
   incomingCookies: string | null,
   allFields: any[]
-): Promise<{ success: boolean; cookies?: string | null; error?: string }> {
+): Promise<{ success: boolean; cookies?: string | null; draftResponse?: string | null; fbzx?: string | null; error?: string }> {
 
   const params = new URLSearchParams();
 
   if (fbzx) params.append('fbzx', fbzx);
+  if (draftResponse) params.append('draftResponse', draftResponse); // 👈 Critical for multi-page state
+
   params.append('fvv', '1');
   params.append('pageHistory', Array.from({ length: pageIndex + 1 }, (_, i) => i).join(','));
   if (hasNextPage) params.append('continue', '1');
@@ -104,11 +115,9 @@ async function submitPage(
     const fieldType = fieldMeta?.type ?? '';
 
     if (Array.isArray(value)) {
-      // radio_grid must be single value — take first element if LLM returned array
       if (fieldType === 'radio_grid') {
         params.append(key, String(value[0]));
       } else {
-        // checkbox / checkbox_grid → repeated key
         value.forEach((v) => params.append(key, String(v)));
       }
       continue;
@@ -116,7 +125,7 @@ async function submitPage(
 
     const strVal = String(value);
 
-    // Date: YYYY-MM-DD → _year / _month / _day
+    // Date
     if (/^\d{4}-\d{2}-\d{2}$/.test(strVal)) {
       const [year, month, day] = strVal.split('-');
       params.append(`${key}_year`,  year);
@@ -125,7 +134,7 @@ async function submitPage(
       continue;
     }
 
-    // Time: HH:MM → _hour / _minute
+    // Time
     if (/^\d{1,2}:\d{2}$/.test(strVal)) {
       const [hour, minute] = strVal.split(':');
       params.append(`${key}_hour`,   String(parseInt(hour,   10)));
@@ -135,8 +144,6 @@ async function submitPage(
 
     params.append(key, strVal);
   }
-
-  console.log('Submitting params:', params.toString().substring(0, 500));
 
   const headers: Record<string, string> = {
     'Content-Type': 'application/x-www-form-urlencoded',
@@ -151,19 +158,40 @@ async function submitPage(
     method:   'POST',
     headers,
     body:     params.toString(),
-    redirect: 'manual',
+    redirect: 'manual', // Prevents aggressive redirects on final submission
   });
-
-  console.log('Google response status:', response.status);
 
   if (response.status >= 400) {
     return { success: false, error: `HTTP ${response.status}` };
   }
 
-  const setCookie  = response.headers.get('set-cookie');
+  const setCookie = response.headers.get('set-cookie');
   const newCookies = setCookie
     ? setCookie.split(',').map(c => c.split(';')[0].trim()).join('; ')
     : incomingCookies;
 
-  return { success: true, cookies: newCookies };
+  let nextDraftResponse = draftResponse;
+  let nextFbzx = fbzx;
+
+  // 👈 Extract updated draftResponse and fbzx from the intermediate HTML response
+  if (hasNextPage && response.status === 200) {
+    const html = await response.text();
+    
+    const draftMatch = html.match(/name="draftResponse" value="(.*?)"/);
+    if (draftMatch && draftMatch[1]) {
+      nextDraftResponse = draftMatch[1].replace(/&quot;/g, '"'); 
+    }
+
+    const fbzxMatch = html.match(/name="fbzx" value="(.*?)"/);
+    if (fbzxMatch && fbzxMatch[1]) {
+      nextFbzx = fbzxMatch[1];
+    }
+  }
+
+  return { 
+    success: true, 
+    cookies: newCookies,
+    draftResponse: nextDraftResponse,
+    fbzx: nextFbzx
+  };
 }
