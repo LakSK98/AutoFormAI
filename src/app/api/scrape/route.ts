@@ -38,6 +38,7 @@ export async function POST(req: Request) {
       columns?: string[];
     }[] = [];
 
+    // ✅ Corrected TYPE_MAP
     const TYPE_MAP: Record<number, string> = {
       0:  'text',
       1:  'textarea',
@@ -45,13 +46,14 @@ export async function POST(req: Request) {
       3:  'dropdown',
       4:  'checkbox',
       5:  'linear_scale',
-      6:  'title_description',
-      7:  'checkbox_grid',
-      8:  'radio_grid',
+      6:  'title_description', // Not a page break
+      7:  'grid',              // Handles BOTH radio and checkbox grids
+      8:  'page_break',        // 👈 This is the actual Section Header/Page Break
       9:  'date',
       10: 'time',
-      11: 'file_upload',
-      13: 'image',
+      11: 'image',
+      12: 'video',
+      13: 'file_upload',
       18: 'rating',
     };
 
@@ -68,14 +70,13 @@ export async function POST(req: Request) {
           const typeCode: number = q[3];
           const type = TYPE_MAP[typeCode] ?? 'text';
 
-          // ✅ Always increment page on any type-6 element (page break or section header)
-          // Google Forms uses type-6 consistently for page breaks in multi-page forms
-          if (typeCode === 6) {
+          // ✅ Correct Page Break Logic
+          if (type === 'page_break') {
             currentPage++;
             continue;
           }
 
-          if (['title_description', 'file_upload', 'image'].includes(type)) continue;
+          if (['title_description', 'file_upload', 'image', 'video'].includes(type)) continue;
 
           const entryArr = q[4];
           if (!entryArr || !entryArr[0]) continue;
@@ -111,7 +112,12 @@ export async function POST(req: Request) {
             continue;
           }
 
-          if (type === 'radio_grid' || type === 'checkbox_grid') {
+          // ✅ Updated Grid Logic (differentiates checkbox vs radio internally)
+          if (type === 'grid') {
+            // In Google Forms, checkbox grids set an array with `1` at index 11
+            const isCheckboxGrid = entryArr[0][11]?.[0] === 1;
+            const actualGridType = isCheckboxGrid ? 'checkbox_grid' : 'radio_grid';
+
             const rawCols: string[] = (entryArr[0][1] ?? []).map((c: any) =>
               typeof c[0] === 'string' ? c[0] : String(c[0])
             );
@@ -125,7 +131,7 @@ export async function POST(req: Request) {
               fields.push({
                 name: `entry.${entryId}`,
                 title: `${title} → ${rowLabel}`,
-                type,
+                type: actualGridType,
                 pageIndex: currentPage,
                 options: rawCols,
                 rows: rowLabels,
@@ -251,8 +257,7 @@ export async function POST(req: Request) {
     const submitUrl = viewUrl.replace('/viewform', '/formResponse');
 
     console.log(`Scraped form: "${formTitle}", ${dedupedFields.length} fields, ${pageCount} pages`);
-    dedupedFields.forEach(f => console.log(`  [page ${f.pageIndex}] ${f.name} (${f.type}) — ${f.title}`));
-
+    
     return NextResponse.json({ title: formTitle, submitUrl, fields: dedupedFields, fbzx, pageCount });
 
   } catch (error: any) {
