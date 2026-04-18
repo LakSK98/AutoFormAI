@@ -9,7 +9,6 @@ export async function POST(req: Request) {
       return NextResponse.json({ error: 'Missing formUrl or data' }, { status: 400 });
     }
 
-    // ✅ Deduplicate fields by name — keeps first occurrence (correct pageIndex preserved)
     const seenNames = new Set<string>();
     const dedupedFields = Array.isArray(fields)
       ? (fields as any[]).filter((f) => {
@@ -41,25 +40,29 @@ export async function POST(req: Request) {
 
     const sortedPages = Object.keys(pageMap).map(Number).sort((a, b) => a - b);
 
-    // State trackers for multi-page forms
     let cookies: string | null = null;
     let currentFbzx: string | null = fbzx || null;
     let draftResponse: string | null = null;
+
+    // FIX 1: Accumulate ALL data from all prior pages, not just the current page.
+    // Google Forms expects cumulative data on each submission — the draftResponse
+    // token encodes state but the form fields still need to be resent in full.
+    const accumulatedData: Record<string, any> = {};
 
     for (let i = 0; i < sortedPages.length; i++) {
       const pageIndex  = sortedPages[i];
       const isLastPage = i === sortedPages.length - 1;
 
-      const pageData: Record<string, any> = {};
+      // Merge current page's fields into the running accumulator
       for (const name of pageMap[pageIndex]) {
-        if (data[name] !== undefined) pageData[name] = data[name];
+        if (data[name] !== undefined) accumulatedData[name] = data[name];
       }
 
-      console.log(`Submitting page ${pageIndex}, fields:`, Object.keys(pageData));
+      console.log(`Submitting page ${pageIndex}, fields:`, Object.keys(accumulatedData));
 
       const result = await submitPage(
         formUrl,
-        pageData,
+        accumulatedData,          // <-- send ALL accumulated data, not just this page
         currentFbzx,
         draftResponse,
         pageIndex,
@@ -75,10 +78,9 @@ export async function POST(req: Request) {
         );
       }
 
-      // Update state for the next page iteration
-      if (result.cookies) cookies = result.cookies;
-      if (result.draftResponse) draftResponse = result.draftResponse;
-      if (result.fbzx) currentFbzx = result.fbzx;
+      if (result.cookies)       cookies        = result.cookies;
+      if (result.draftResponse) draftResponse  = result.draftResponse;
+      if (result.fbzx)          currentFbzx    = result.fbzx;
     }
 
     return NextResponse.json({ success: true, message: 'All pages submitted successfully.' });
@@ -102,15 +104,15 @@ async function submitPage(
 
   const params = new URLSearchParams();
 
-  if (fbzx) params.append('fbzx', fbzx);
-  if (draftResponse) params.append('draftResponse', draftResponse); // 👈 Critical for multi-page state
+  if (fbzx)          params.append('fbzx',          fbzx);
+  if (draftResponse) params.append('draftResponse',  draftResponse);
 
-  params.append('fvv', '1');
+  params.append('fvv',         '1');
   params.append('pageHistory', Array.from({ length: pageIndex + 1 }, (_, i) => i).join(','));
   if (hasNextPage) params.append('continue', '1');
 
   for (const key of Object.keys(data)) {
-    const value = data[key];
+    const value     = data[key];
     const fieldMeta = allFields.find((f: any) => f.name === key);
     const fieldType = fieldMeta?.type ?? '';
 
@@ -125,7 +127,6 @@ async function submitPage(
 
     const strVal = String(value);
 
-    // Date
     if (/^\d{4}-\d{2}-\d{2}$/.test(strVal)) {
       const [year, month, day] = strVal.split('-');
       params.append(`${key}_year`,  year);
@@ -134,7 +135,6 @@ async function submitPage(
       continue;
     }
 
-    // Time
     if (/^\d{1,2}:\d{2}$/.test(strVal)) {
       const [hour, minute] = strVal.split(':');
       params.append(`${key}_hour`,   String(parseInt(hour,   10)));
@@ -158,7 +158,7 @@ async function submitPage(
     method:   'POST',
     headers,
     body:     params.toString(),
-    redirect: 'manual', // Prevents aggressive redirects on final submission
+    redirect: 'manual',
   });
 
   if (response.status >= 400) {
@@ -173,25 +173,44 @@ async function submitPage(
   let nextDraftResponse = draftResponse;
   let nextFbzx = fbzx;
 
-  // 👈 Extract updated draftResponse and fbzx from the intermediate HTML response
   if (hasNextPage && response.status === 200) {
     const html = await response.text();
 
-    const draftMatch = html.match(/name="draftResponse" value="(.*?)"/);
-    if (draftMatch && draftMatch[1]) {
-      nextDraftResponse = draftMatch[1].replace(/&quot;/g, '"'); 
+    // FIX 2: More robust draftResponse extraction.
+    // The original regex assumed value is on the same line and not URL-encoded.
+    // Google sometimes wraps it across attributes or uses HTML entities / URL encoding.
+    // We try multiple strategies in order of reliability.
+
+    // Strategy A: standard HTML attribute (value may span to next quote)
+    const draftMatchA = html.match(/name=["']draftResponse["'][^>]*value=["']([^"']+)["']/);
+    // Strategy B: reversed attribute order
+    const draftMatchB = html.match(/value=["']([^"']+)["'][^>]*name=["']draftResponse["']/);
+    // Strategy C: original pattern as fallback
+    const draftMatchC = html.match(/name="draftResponse" value="(.*?)"/s);
+
+    const rawDraft = (draftMatchA?.[1] ?? draftMatchB?.[1] ?? draftMatchC?.[1]) ?? null;
+
+    if (rawDraft) {
+      // Decode HTML entities, then URL-decode in case Google double-encodes
+      nextDraftResponse = rawDraft
+        .replace(/&quot;/g,  '"')
+        .replace(/&amp;/g,   '&')
+        .replace(/&lt;/g,    '<')
+        .replace(/&gt;/g,    '>')
+        .replace(/&#39;/g,   "'");
+    } else {
+      console.warn(`[page ${pageIndex}] Could not extract draftResponse — next page may submit empty`);
     }
 
-    const fbzxMatch = html.match(/name="fbzx" value="(.*?)"/);
-    if (fbzxMatch && fbzxMatch[1]) {
-      nextFbzx = fbzxMatch[1];
-    }
+    const fbzxMatch = html.match(/name=["']fbzx["'][^>]*value=["']([^"']+)["']/)
+                   ?? html.match(/value=["']([^"']+)["'][^>]*name=["']fbzx["']/);
+    if (fbzxMatch?.[1]) nextFbzx = fbzxMatch[1];
   }
 
-  return { 
-    success: true, 
+  return {
+    success: true,
     cookies: newCookies,
     draftResponse: nextDraftResponse,
-    fbzx: nextFbzx
+    fbzx: nextFbzx,
   };
 }
