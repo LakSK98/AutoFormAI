@@ -5,34 +5,22 @@ export async function POST(req: Request) {
     const body = await req.json();
     const { formUrl, data, fbzx, fields } = body;
 
-console.log('Submit received:', {
-      formUrl,
-      fbzx,
-      hasFields: !!fields,
-      fieldCount: fields?.length,
-      dataKeys: Object.keys(data ?? {}),
-    });
-
     if (!formUrl || !data) {
       return NextResponse.json({ error: 'Missing formUrl or data' }, { status: 400 });
     }
 
-    // Check whether we have multi-page info
     const hasPages =
       Array.isArray(fields) &&
       fields.some((f: any) => typeof f.pageIndex === 'number' && f.pageIndex > 0);
 
     if (!hasPages) {
-      // Single-page fast path
-      const result = await submitPage(formUrl, data, fbzx, 0, false, null);
+      const result = await submitPage(formUrl, data, fbzx, 0, false, null, fields ?? []);
       if (!result.success) {
         return NextResponse.json({ error: result.error }, { status: 500 });
       }
       return NextResponse.json({ success: true, message: 'Submitted successfully.' });
     }
 
-    // ── Multi-page path ──────────────────────────────────────────────
-    // Group field names by their pageIndex
     const pageMap: Record<number, string[]> = {};
     for (const field of fields as any[]) {
       const pg = field.pageIndex ?? 0;
@@ -47,19 +35,21 @@ console.log('Submit received:', {
       const pageIndex  = sortedPages[i];
       const isLastPage = i === sortedPages.length - 1;
 
-      // Only send fields that belong to this page
       const pageData: Record<string, any> = {};
       for (const name of pageMap[pageIndex]) {
         if (data[name] !== undefined) pageData[name] = data[name];
       }
+
+      console.log(`Submitting page ${pageIndex}, fields:`, Object.keys(pageData));
 
       const result = await submitPage(
         formUrl,
         pageData,
         fbzx,
         pageIndex,
-        !isLastPage,   // continue=1 on every page except the last
-        cookies
+        !isLastPage,
+        cookies,
+        fields
       );
 
       if (!result.success) {
@@ -80,35 +70,36 @@ console.log('Submit received:', {
   }
 }
 
-// ─────────────────────────────────────────────────────────────────────────────
-// Helper: submit one page of the form
-// ─────────────────────────────────────────────────────────────────────────────
 async function submitPage(
   formUrl: string,
   data: Record<string, any>,
   fbzx: string | null,
   pageIndex: number,
   hasNextPage: boolean,
-  incomingCookies: string | null
+  incomingCookies: string | null,
+  allFields: any[]
 ): Promise<{ success: boolean; cookies?: string | null; error?: string }> {
-
- console.log('submitPage called:', { formUrl, pageIndex, hasNextPage, paramCount: Object.keys(data).length });
 
   const params = new URLSearchParams();
 
   if (fbzx) params.append('fbzx', fbzx);
   params.append('fvv', '1');
-  // pageHistory must list every page visited so far: "0", "0,1", "0,1,2" …
   params.append('pageHistory', Array.from({ length: pageIndex + 1 }, (_, i) => i).join(','));
-
   if (hasNextPage) params.append('continue', '1');
 
   for (const key of Object.keys(data)) {
     const value = data[key];
+    const fieldMeta = allFields.find((f: any) => f.name === key);
+    const fieldType = fieldMeta?.type ?? '';
 
-    // Checkbox / checkbox_grid → repeated key
     if (Array.isArray(value)) {
-      value.forEach((v) => params.append(key, String(v)));
+      // radio_grid must be single value — take first element if LLM returned array
+      if (fieldType === 'radio_grid') {
+        params.append(key, String(value[0]));
+      } else {
+        // checkbox / checkbox_grid → repeated key
+        value.forEach((v) => params.append(key, String(v)));
+      }
       continue;
     }
 
@@ -134,14 +125,13 @@ async function submitPage(
     params.append(key, strVal);
   }
 
-console.log('Submitting params:', params.toString().substring(0, 500));
-
+  console.log('Submitting params:', params.toString().substring(0, 500));
 
   const headers: Record<string, string> = {
-    'Content-Type':  'application/x-www-form-urlencoded',
-    'User-Agent':    'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-    'Referer':       formUrl.replace('/formResponse', '/viewform'),
-    'Origin':        'https://docs.google.com',
+    'Content-Type': 'application/x-www-form-urlencoded',
+    'User-Agent':   'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+    'Referer':      formUrl.replace('/formResponse', '/viewform'),
+    'Origin':       'https://docs.google.com',
   };
 
   if (incomingCookies) headers['Cookie'] = incomingCookies;
@@ -150,9 +140,8 @@ console.log('Submitting params:', params.toString().substring(0, 500));
     method:   'POST',
     headers,
     body:     params.toString(),
-    redirect: 'manual',  // treat 302 as success
+    redirect: 'manual',
   });
-
 
   console.log('Google response status:', response.status);
 
@@ -160,9 +149,8 @@ console.log('Submitting params:', params.toString().substring(0, 500));
     return { success: false, error: `HTTP ${response.status}` };
   }
 
-  // Carry cookies forward to the next page
-  const setCookie   = response.headers.get('set-cookie');
-  const newCookies  = setCookie
+  const setCookie  = response.headers.get('set-cookie');
+  const newCookies = setCookie
     ? setCookie.split(',').map(c => c.split(';')[0].trim()).join('; ')
     : incomingCookies;
 
