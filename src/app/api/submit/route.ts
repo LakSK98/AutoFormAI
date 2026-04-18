@@ -5,6 +5,14 @@ export async function POST(req: Request) {
     const body = await req.json();
     const { formUrl, data, fbzx, fields } = body;
 
+console.log('Submit received:', {
+      formUrl,
+      fbzx,
+      hasFields: !!fields,
+      fieldCount: fields?.length,
+      dataKeys: Object.keys(data ?? {}),
+    });
+
     if (!formUrl || !data) {
       return NextResponse.json({ error: 'Missing formUrl or data' }, { status: 400 });
     }
@@ -84,6 +92,8 @@ async function submitPage(
   incomingCookies: string | null
 ): Promise<{ success: boolean; cookies?: string | null; error?: string }> {
 
+ console.log('submitPage called:', { formUrl, pageIndex, hasNextPage, paramCount: Object.keys(data).length });
+
   const params = new URLSearchParams();
 
   if (fbzx) params.append('fbzx', fbzx);
@@ -124,6 +134,9 @@ async function submitPage(
     params.append(key, strVal);
   }
 
+console.log('Submitting params:', params.toString().substring(0, 500));
+
+
   const headers: Record<string, string> = {
     'Content-Type':  'application/x-www-form-urlencoded',
     'User-Agent':    'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
@@ -139,6 +152,9 @@ async function submitPage(
     body:     params.toString(),
     redirect: 'manual',  // treat 302 as success
   });
+
+
+  console.log('Google response status:', response.status);
 
   if (response.status >= 400) {
     return { success: false, error: `HTTP ${response.status}` };
