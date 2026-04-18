@@ -9,20 +9,31 @@ export async function POST(req: Request) {
       return NextResponse.json({ error: 'Missing formUrl or data' }, { status: 400 });
     }
 
-    const hasPages =
-      Array.isArray(fields) &&
-      fields.some((f: any) => typeof f.pageIndex === 'number' && f.pageIndex > 0);
+    // ✅ Deduplicate fields by name — keeps first occurrence (correct pageIndex preserved)
+    const seenNames = new Set<string>();
+    const dedupedFields = Array.isArray(fields)
+      ? (fields as any[]).filter((f) => {
+          if (seenNames.has(f.name)) return false;
+          seenNames.add(f.name);
+          return true;
+        })
+      : [];
+
+    const hasPages = dedupedFields.some(
+      (f: any) => typeof f.pageIndex === 'number' && f.pageIndex > 0
+    );
 
     if (!hasPages) {
-      const result = await submitPage(formUrl, data, fbzx, 0, false, null, fields ?? []);
+      const result = await submitPage(formUrl, data, fbzx, 0, false, null, dedupedFields);
       if (!result.success) {
         return NextResponse.json({ error: result.error }, { status: 500 });
       }
       return NextResponse.json({ success: true, message: 'Submitted successfully.' });
     }
 
+    // Build page → field names map from deduplicated fields
     const pageMap: Record<number, string[]> = {};
-    for (const field of fields as any[]) {
+    for (const field of dedupedFields) {
       const pg = field.pageIndex ?? 0;
       if (!pageMap[pg]) pageMap[pg] = [];
       pageMap[pg].push(field.name);
@@ -49,7 +60,7 @@ export async function POST(req: Request) {
         pageIndex,
         !isLastPage,
         cookies,
-        fields
+        dedupedFields
       );
 
       if (!result.success) {
