@@ -50,12 +50,12 @@ export async function POST(req: Request) {
       return NextResponse.json({ error: 'Missing required configuration parameters.' }, { status: 400 });
     }
 
-    // GitHub Models uses a GitHub PAT as the API Key
-    const githubToken = process.env.GITHUB_TOKEN;
+    // Groq API Key
+    const groqApiKey = process.env.GROQ_API_KEY;
     const qstashToken = process.env.QSTASH_TOKEN;
 
-    if (!githubToken || !qstashToken) {
-      return NextResponse.json({ error: 'Missing API keys (GITHUB_TOKEN or QSTASH_TOKEN).' }, { status: 500 });
+    if (!groqApiKey || !qstashToken) {
+      return NextResponse.json({ error: 'Missing API keys (GROQ_API_KEY or QSTASH_TOKEN).' }, { status: 500 });
     }
 
     const seenNames = new Set<string>();
@@ -65,10 +65,10 @@ export async function POST(req: Request) {
       return true;
     });
 
-    // Initialize GitHub Models Client
-    const githubModels = new OpenAI({
-      apiKey: githubToken,
-      baseURL: "https://models.inference.ai.azure.com",
+    // Initialize Groq Client via OpenAI SDK
+    const groq = new OpenAI({
+      apiKey: groqApiKey,
+      baseURL: "https://api.groq.com/openai/v1",
     });
 
     // ── Step 1: Parse hard overrides ─────────────────────────────────────────────
@@ -103,14 +103,14 @@ Return ONLY a raw JSON object:
 }
 `.trim();
 
-      const classifyCompletion = await githubModels.chat.completions.create({
+      const classifyCompletion = await groq.chat.completions.create({
         messages: [{ role: 'user', content: classifyPrompt }],
-        model: 'gpt-4o', // You can also use 'meta-llama-3-70b-instruct'
+        model: 'llama-3.3-70b-versatile',
         temperature: 0,
+        response_format: { type: 'json_object' },
       });
 
       let classifyContent = classifyCompletion.choices[0]?.message?.content ?? '{}';
-      classifyContent = classifyContent.replace(/```json/g, '').replace(/```/g, '').trim();
 
       try {
         const parsed = JSON.parse(classifyContent);
@@ -165,15 +165,16 @@ Never use: ${JSON.stringify(excludedOptions)}
 Return ONLY the raw JSON array.
 `.trim();
 
-    const chatCompletion = await githubModels.chat.completions.create({
+    const chatCompletion = await groq.chat.completions.create({
       messages: [{ role: 'user', content: prompt }],
-      model: 'gpt-4o',
+      model: 'llama-3.3-70b-versatile',
       temperature: 0.85,
     });
 
     let content = chatCompletion.choices[0]?.message?.content ?? '[]';
     content = content.replace(/```json/g, '').replace(/```/g, '').trim();
     let generatedData = JSON.parse(content);
+
 
     // ── Step 6: Inject hard overrides + Post-processing ───────────────────────────
     const findMostNegative = (options: string[]) => options.find(o => /disagree|never/i.test(o)) ?? options[0];
@@ -222,7 +223,7 @@ Return ONLY the raw JSON array.
 
     return NextResponse.json({
       success: true,
-      message: `Scheduled ${generatedData.length} responses via GitHub Models.`,
+      message: `Scheduled ${generatedData.length} responses via Groq.`,
     });
 
   } catch (error: any) {
