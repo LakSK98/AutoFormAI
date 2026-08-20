@@ -1,36 +1,53 @@
-This is a [Next.js](https://nextjs.org) project bootstrapped with [`create-next-app`](https://nextjs.org/docs/app/api-reference/cli/create-next-app).
+# AutoForm AI
 
-## Getting Started
+Generates realistic mock responses with an LLM and submits them to a public Google Form,
+optionally spread over a time window via QStash.
 
-First, run the development server:
+## Setup
 
 ```bash
+npm install
 npm run dev
-# or
-yarn dev
-# or
-pnpm dev
-# or
-bun dev
 ```
 
-Open [http://localhost:3000](http://localhost:3000) with your browser to see the result.
+### Environment variables
 
-You can start editing the page by modifying `app/page.tsx`. The page auto-updates as you edit the file.
+| Variable | Required | Purpose |
+| --- | --- | --- |
+| `GROQ_API_KEY` | yes | Response generation (Llama 3.3 70B via Groq). |
+| `QSTASH_TOKEN` | yes | Queues and delays the submissions. |
+| `QSTASH_CURRENT_SIGNING_KEY` | recommended | Verifies that `/api/submit` was really called by QStash. |
+| `QSTASH_NEXT_SIGNING_KEY` | recommended | Second key used during QStash key rotation. |
 
-This project uses [`next/font`](https://nextjs.org/docs/app/building-your-application/optimizing/fonts) to automatically optimize and load [Geist](https://vercel.com/font), a new font family for Vercel.
+Both signing keys are in the Upstash QStash console. **If they are not set, `/api/submit`
+accepts unsigned requests** and anyone who knows the URL can push submissions through your
+deployment; the server logs a warning on every request in that state.
 
-## Learn More
+## Verifying a form before launching a campaign
 
-To learn more about Next.js, take a look at the following resources:
+Step 2 has a **Test 1 response** button. It generates one response, submits it immediately,
+and reports whether Google actually recorded it — including the specific validation message
+if Google rejected it. Use this before scheduling a batch.
 
-- [Next.js Documentation](https://nextjs.org/docs) - learn about Next.js features and API.
-- [Learn Next.js](https://nextjs.org/learn) - an interactive Next.js tutorial.
+## Supported question types
 
-You can check out [the Next.js GitHub repository](https://github.com/vercel/next.js) - your feedback and contributions are welcome!
+Short answer, paragraph, multiple choice (incl. *Other*), dropdown, checkboxes (incl. *Other*),
+linear scale, rating, multiple-choice grid, checkbox grid, date (all four year/time variants),
+time of day, duration, and the `emailAddress` field added by "Collect email addresses".
 
-## Deploy on Vercel
+File uploads cannot be automated — they need a signed-in Google account. If a form has a
+**required** file upload, the scraper says so up front, because no submission can succeed.
 
-The easiest way to deploy your Next.js app is to use the [Vercel Platform](https://vercel.com/new?utm_medium=default-template&filter=next.js&utm_source=create-next-app&utm_campaign=create-next-app-readme) from the creators of Next.js.
+Forms that route people to different sections based on their answers are submitted in plain
+section order, which may not match every branch. The scraper warns when it detects branching.
 
-Check out our [Next.js deployment documentation](https://nextjs.org/docs/app/building-your-application/deploying) for more details.
+## Tests
+
+```bash
+npm test
+```
+
+Covers parameter encoding for every question type, date/time parsing, option matching and
+repair, cookie handling, success-vs-validation-error detection, the multi-section flow
+(against a mock Google Forms server), and the scraper (against a synthetic form containing
+one of every question type).

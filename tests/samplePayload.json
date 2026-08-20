@@ -1,0 +1,20 @@
+{
+  "formUrl": "http://localhost:3100/formResponse",
+  "pageCount": 1,
+  "fields": [
+    { "name": "entry.1", "title": "Your name", "type": "text", "pageIndex": 0, "required": true },
+    { "name": "entry.2", "title": "Joined on", "type": "date", "pageIndex": 0, "required": true },
+    { "name": "entry.3", "title": "Session length", "type": "time", "pageIndex": 0, "required": true, "isDuration": true },
+    { "name": "entry.4", "title": "How often?", "type": "radio", "pageIndex": 0, "required": true, "options": ["Daily", "Weekly"], "hasOther": true },
+    { "name": "entry.5", "title": "Channels", "type": "checkbox", "pageIndex": 0, "required": true, "options": ["Email", "SMS", "Push"] },
+    { "name": "entry.6", "title": "Rate us", "type": "linear_scale", "pageIndex": 0, "required": true, "low": 1, "high": 5 }
+  ],
+  "data": {
+    "entry.1": "Alex Perera",
+    "entry.2": "2025-08-20 14:30",
+    "entry.3": "1:45:00",
+    "entry.4": "Twice a month",
+    "entry.5": ["Email", "Push"],
+    "entry.6": 9
+  }
+}

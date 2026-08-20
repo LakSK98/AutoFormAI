@@ -6,7 +6,8 @@
     "dev": "next dev",
     "build": "next build",
     "start": "next start",
-    "lint": "eslint"
+    "lint": "eslint",
+    "test": "tsc -p tests/tsconfig.json && node tests/formLogic.test.mjs && node tests/multiPage.test.mjs && node tests/scrape.test.mjs"
   },
   "dependencies": {
     "next": "16.2.2",

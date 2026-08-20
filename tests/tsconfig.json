@@ -1,0 +1,17 @@
+{
+  "compilerOptions": {
+    "target": "es2020",
+    "module": "commonjs",
+    "moduleResolution": "node",
+    "esModuleInterop": true,
+    "skipLibCheck": true,
+    "strict": false,
+    "noEmit": false,
+    "outDir": "build",
+    "rootDir": "../src",
+    "baseUrl": "../src",
+    "lib": ["es2020", "dom", "dom.iterable"],
+    "paths": { "@/*": ["./*"] }
+  },
+  "include": ["../src/lib/**/*.ts", "../src/app/api/scrape/route.ts"]
+}
