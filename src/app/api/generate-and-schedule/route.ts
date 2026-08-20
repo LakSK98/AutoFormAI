@@ -17,7 +17,95 @@ export const maxDuration = 300;
 
 type FieldIntent = 'positive' | 'negative' | 'random';
 
-const MODEL = 'llama-3.3-70b-versatile';
+/* ------------------------------------------------------------------ */
+/* LLM provider                                                        */
+/* ------------------------------------------------------------------ */
+
+interface Provider {
+  label: string;
+  apiKey: string;
+  baseURL: string;
+  model: string;
+  /** Env var to set if the model id needs changing. */
+  modelEnvVar: string;
+}
+
+/**
+ * Gemini wins when its key is present, otherwise Groq. Both speak the
+ * OpenAI-compatible protocol, so the same client works for either.
+ *
+ * Model ids get retired (llama-3.3-70b-versatile was), so both are overridable
+ * without a code change.
+ */
+function resolveProvider(): Provider | null {
+  const geminiKey = process.env.GEMINI_API_KEY ?? process.env.GOOGLE_API_KEY;
+  if (geminiKey) {
+    return {
+      label: 'Gemini',
+      apiKey: geminiKey,
+      baseURL: 'https://generativelanguage.googleapis.com/v1beta/openai/',
+      model: process.env.GEMINI_MODEL ?? 'gemini-3.7-flash',
+      modelEnvVar: 'GEMINI_MODEL',
+    };
+  }
+
+  const groqKey = process.env.GROQ_API_KEY;
+  if (groqKey) {
+    return {
+      label: 'Groq',
+      apiKey: groqKey,
+      baseURL: 'https://api.groq.com/openai/v1',
+      model: process.env.GROQ_MODEL ?? 'openai/gpt-oss-120b',
+      modelEnvVar: 'GROQ_MODEL',
+    };
+  }
+
+  return null;
+}
+
+/**
+ * Ask for JSON, tolerating providers that reject `response_format`. Gemini's
+ * compatibility layer favours schema-based structured output, so a plain
+ * `json_object` request may be refused; the prompt asks for raw JSON anyway and
+ * safeParse() salvages it.
+ */
+async function chatJson(
+  client: OpenAI,
+  provider: Provider,
+  prompt: string,
+  temperature: number,
+): Promise<string> {
+  const base = {
+    messages: [{ role: 'user' as const, content: prompt }],
+    model: provider.model,
+    temperature,
+  };
+
+  try {
+    const completion = await client.chat.completions.create({
+      ...base,
+      response_format: { type: 'json_object' },
+    });
+    return completion.choices[0]?.message?.content ?? '';
+  } catch (err) {
+    const message = (err as Error).message ?? '';
+
+    if (/response_format|json_object|json_mode/i.test(message)) {
+      console.warn(`[generate] ${provider.label} rejected response_format; retrying without it.`);
+      const completion = await client.chat.completions.create(base);
+      return completion.choices[0]?.message?.content ?? '';
+    }
+
+    if (/does not exist|not found|404|decommission|deprecat/i.test(message)) {
+      throw new Error(
+        `${provider.label} rejected the model "${provider.model}". Set ${provider.modelEnvVar} in your environment to a model your account can use. ${message}`,
+      );
+    }
+
+    throw err;
+  }
+}
+
 const BATCH_SIZE = 10;
 const BATCH_CONCURRENCY = 3;
 const MAX_COUNT = 100;
@@ -279,9 +367,12 @@ export async function POST(req: Request) {
     const isTest = mode === 'test';
     const requested = isTest ? 1 : clamp(toInt(count) ?? 1, 1, MAX_COUNT);
 
-    const groqApiKey = process.env.GROQ_API_KEY;
-    if (!groqApiKey) {
-      return NextResponse.json({ error: 'Missing GROQ_API_KEY.' }, { status: 500 });
+    const provider = resolveProvider();
+    if (!provider) {
+      return NextResponse.json(
+        { error: 'No LLM key configured. Set GEMINI_API_KEY or GROQ_API_KEY.' },
+        { status: 500 },
+      );
     }
 
     const qstashToken = process.env.QSTASH_TOKEN;
@@ -296,7 +387,8 @@ export async function POST(req: Request) {
       return true;
     });
 
-    const groq = new OpenAI({ apiKey: groqApiKey, baseURL: 'https://api.groq.com/openai/v1' });
+    const client = new OpenAI({ apiKey: provider.apiKey, baseURL: provider.baseURL });
+    console.log(`[generate] using ${provider.label} / ${provider.model}`);
     const contextText = typeof context === 'string' ? context : '';
 
     /* ---- Step 1: deterministic overrides from the context box ---- */
@@ -331,14 +423,8 @@ export async function POST(req: Request) {
           'Return ONLY raw JSON: {"intents":{"entry.123":"positive"|"negative"|"random"},"excludedOptions":["string"]}',
         ].join('\n');
 
-        const completion = await groq.chat.completions.create({
-          messages: [{ role: 'user', content: classifyPrompt }],
-          model: MODEL,
-          temperature: 0,
-          response_format: { type: 'json_object' },
-        });
-
-        const parsed = safeParse(completion.choices[0]?.message?.content ?? '{}') as any;
+        const raw = await chatJson(client, provider, classifyPrompt, 0);
+        const parsed = safeParse(raw || '{}') as any;
         if (parsed?.intents && typeof parsed.intents === 'object') {
           for (const [name, intent] of Object.entries(parsed.intents)) {
             if (intent === 'positive' || intent === 'negative' || intent === 'random') {
@@ -390,13 +476,8 @@ export async function POST(req: Request) {
 
     const rawBatches = await mapLimit(batches, BATCH_CONCURRENCY, async (n) => {
       const prompt = `${basePrompt}\n\nReturn ONLY raw JSON shaped as {"responses":[ ... ]} containing exactly ${n} response objects.`;
-      const completion = await groq.chat.completions.create({
-        messages: [{ role: 'user', content: prompt }],
-        model: MODEL,
-        temperature: 0.9,
-        response_format: { type: 'json_object' },
-      });
-      return extractRows(safeParse(completion.choices[0]?.message?.content ?? '{}'));
+      const raw = await chatJson(client, provider, prompt, 0.9);
+      return extractRows(safeParse(raw || '{}'));
     });
 
     const rawRows = rawBatches.flat();

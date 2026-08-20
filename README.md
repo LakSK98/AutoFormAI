@@ -14,10 +14,45 @@ npm run dev
 
 | Variable | Required | Purpose |
 | --- | --- | --- |
-| `GROQ_API_KEY` | yes | Response generation (Llama 3.3 70B via Groq). |
+| `GEMINI_API_KEY` | one of these | Response generation via Google Gemini. Takes priority when set. |
+| `GROQ_API_KEY` | one of these | Response generation via Groq. Used when there is no Gemini key. |
+| `GEMINI_MODEL` | no | Overrides the Gemini model id. Default `gemini-3.7-flash`. |
+| `GROQ_MODEL` | no | Overrides the Groq model id. Default `openai/gpt-oss-120b`. |
 | `QSTASH_TOKEN` | yes | Queues and delays the submissions. |
+| `QSTASH_URL` | no | Points the QStash SDK at a local QStash dev server. |
 | `QSTASH_CURRENT_SIGNING_KEY` | recommended | Verifies that `/api/submit` was really called by QStash. |
 | `QSTASH_NEXT_SIGNING_KEY` | recommended | Second key used during QStash key rotation. |
+
+### Choosing a model provider
+
+Both providers speak the OpenAI-compatible protocol, so only the key, base URL and model id
+differ. Set **one** of `GEMINI_API_KEY` or `GROQ_API_KEY`; Gemini wins if both are present.
+The server logs which one it picked on every run:
+
+```
+[generate] using Groq / openai/gpt-oss-120b
+```
+
+**Model ids get retired.** `llama-3.3-70b-versatile` was decommissioned by Groq, which is why
+both providers accept a `*_MODEL` override — you can move to a new model without a code
+change. If the model is rejected, the API returns a message naming the env var to set.
+
+To find out what your keys can actually use — and whether each model handles the JSON output
+this app depends on — run the checker instead of trusting any documentation:
+
+```bash
+node tests/checkModels.mjs                    # probes the defaults for both providers
+node tests/checkModels.mjs gemini-3.7-flash   # probe specific model ids
+```
+
+It reads `.env`, lists every model each key can see, and sends a real JSON-shaped request to
+each candidate, reporting whether `response_format: json_object` is accepted or has to be
+skipped.
+
+**Gemini's free tier**: available for the Flash models, with per-minute and per-day request
+limits. Get a key at [aistudio.google.com](https://aistudio.google.com/apikey). Note that
+Google states free-tier content **is used to improve their products** — if the persona text or
+generated responses are sensitive, use the paid tier or stay on Groq.
 
 Both signing keys are in the Upstash QStash console. **If they are not set, `/api/submit`
 accepts unsigned requests** and anyone who knows the URL can push submissions through your
