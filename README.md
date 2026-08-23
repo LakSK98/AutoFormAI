@@ -14,10 +14,17 @@ npm run dev
 
 | Variable | Required | Purpose |
 | --- | --- | --- |
-| `GEMINI_API_KEY` | one of these | Response generation via Google Gemini. Takes priority when set. |
+| `CEREBRAS_API_KEY` | one of these | Response generation via Cerebras. Most generous free daily quota. |
+| `GEMINI_API_KEY` | one of these | Response generation via Google Gemini. |
 | `GROQ_API_KEY` | one of these | Response generation via Groq. Used when there is no Gemini key. |
 | `GEMINI_MODEL` | no | Overrides the Gemini model id. Default `gemini-3.7-flash`. |
 | `GROQ_MODEL` | no | Overrides the Groq model id. Default `openai/gpt-oss-120b`. |
+| `CEREBRAS_MODEL` | no | Overrides the Cerebras model id. Default `gpt-oss-120b`. |
+| `LLM_BASE_URL` | no | Any OpenAI-compatible endpoint (Ollama, OpenRouter, Together). Wins over all keys. |
+| `LLM_MODEL` / `LLM_API_KEY` / `LLM_LABEL` | no | Model, key and display name for `LLM_BASE_URL`. |
+| `LLM_PROVIDER` | no | Force one provider by name when several keys are set. |
+| `LLM_BATCH_SIZE` | no | Responses generated per request. Default 10. |
+| `LLM_CONCURRENCY` | no | Parallel generation requests. Default 1 — raise only on a paid plan. |
 | `QSTASH_TOKEN` | yes | Queues and delays the submissions. |
 | `QSTASH_URL` | no | Points the QStash SDK at a local QStash dev server. |
 | `QSTASH_CURRENT_SIGNING_KEY` | recommended | Verifies that `/api/submit` was really called by QStash. |
@@ -48,6 +55,39 @@ node tests/checkModels.mjs gemini-3.7-flash   # probe specific model ids
 It reads `.env`, lists every model each key can see, and sends a real JSON-shaped request to
 each candidate, reporting whether `response_format: json_object` is accepted or has to be
 skipped.
+
+### Rate limits
+
+Free tiers cap **tokens per minute**, not just requests, and generating 100 responses means
+several calls in quick succession. The app handles this rather than failing:
+
+- Batches run **sequentially** by default (`LLM_CONCURRENCY=1`) so calls do not burst.
+- A `429` is retried up to 6 times, waiting exactly as long as the provider asks
+  ("Please try again in 3.2925s") rather than guessing.
+- If a batch still fails, the responses that *did* generate are kept and reused to fill the
+  campaign; the run reports how many were unique instead of failing outright.
+
+Rough free-tier ceilings (verify before relying on them — they change often):
+
+| Provider | Free limit |
+| --- | --- |
+| Cerebras | ~1M tokens/day, 60–100k tokens/min |
+| Groq | 8,000 tokens/min on `on_demand` |
+| Gemini | Per-minute and per-day request caps on Flash models |
+| Ollama (local) | No limit — bounded only by your hardware |
+
+**Truly unlimited means local.** Point the app at Ollama and there is no quota at all:
+
+```bash
+ollama serve
+ollama pull llama3.1
+```
+
+```bash
+LLM_BASE_URL=http://localhost:11434/v1
+LLM_MODEL=llama3.1
+LLM_LABEL=Ollama
+```
 
 **Gemini's free tier**: available for the Flash models, with per-minute and per-day request
 limits. Get a key at [aistudio.google.com](https://aistudio.google.com/apikey). Note that

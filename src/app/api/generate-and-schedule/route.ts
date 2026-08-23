@@ -31,36 +31,61 @@ interface Provider {
 }
 
 /**
- * Gemini wins when its key is present, otherwise Groq. Both speak the
- * OpenAI-compatible protocol, so the same client works for either.
+ * Any OpenAI-compatible endpoint works. `LLM_BASE_URL` wins so you can point at
+ * a local Ollama, OpenRouter, Together or anything else without a code change;
+ * otherwise the first provider whose key is set is used.
  *
- * Model ids get retired (llama-3.3-70b-versatile was), so both are overridable
- * without a code change.
+ * Model ids get retired (llama-3.3-70b-versatile was), so every entry is
+ * overridable via its `*_MODEL` variable.
  */
 function resolveProvider(): Provider | null {
-  const geminiKey = process.env.GEMINI_API_KEY ?? process.env.GOOGLE_API_KEY;
-  if (geminiKey) {
+  const custom = process.env.LLM_BASE_URL;
+  if (custom) {
     return {
-      label: 'Gemini',
-      apiKey: geminiKey,
-      baseURL: 'https://generativelanguage.googleapis.com/v1beta/openai/',
-      model: process.env.GEMINI_MODEL ?? 'gemini-3.7-flash',
-      modelEnvVar: 'GEMINI_MODEL',
+      label: process.env.LLM_LABEL ?? 'Custom',
+      // Ollama and friends ignore the key but the SDK requires a non-empty one.
+      apiKey: process.env.LLM_API_KEY ?? 'not-needed',
+      baseURL: custom,
+      model: process.env.LLM_MODEL ?? 'llama3.1',
+      modelEnvVar: 'LLM_MODEL',
     };
   }
 
-  const groqKey = process.env.GROQ_API_KEY;
-  if (groqKey) {
-    return {
-      label: 'Groq',
-      apiKey: groqKey,
-      baseURL: 'https://api.groq.com/openai/v1',
-      model: process.env.GROQ_MODEL ?? 'openai/gpt-oss-120b',
-      modelEnvVar: 'GROQ_MODEL',
-    };
-  }
+  const candidates: Array<Provider | null> = [
+    process.env.CEREBRAS_API_KEY
+      ? {
+          label: 'Cerebras',
+          apiKey: process.env.CEREBRAS_API_KEY,
+          baseURL: 'https://api.cerebras.ai/v1',
+          model: process.env.CEREBRAS_MODEL ?? 'gpt-oss-120b',
+          modelEnvVar: 'CEREBRAS_MODEL',
+        }
+      : null,
+    process.env.GEMINI_API_KEY ?? process.env.GOOGLE_API_KEY
+      ? {
+          label: 'Gemini',
+          apiKey: (process.env.GEMINI_API_KEY ?? process.env.GOOGLE_API_KEY)!,
+          baseURL: 'https://generativelanguage.googleapis.com/v1beta/openai/',
+          model: process.env.GEMINI_MODEL ?? 'gemini-3.7-flash',
+          modelEnvVar: 'GEMINI_MODEL',
+        }
+      : null,
+    process.env.GROQ_API_KEY
+      ? {
+          label: 'Groq',
+          apiKey: process.env.GROQ_API_KEY,
+          baseURL: 'https://api.groq.com/openai/v1',
+          model: process.env.GROQ_MODEL ?? 'openai/gpt-oss-120b',
+          modelEnvVar: 'GROQ_MODEL',
+        }
+      : null,
+  ].filter(Boolean);
 
-  return null;
+  const forced = process.env.LLM_PROVIDER?.toLowerCase();
+  if (forced) {
+    return candidates.find((c) => c!.label.toLowerCase() === forced) ?? null;
+  }
+  return candidates[0] ?? null;
 }
 
 /**
@@ -69,45 +94,96 @@ function resolveProvider(): Provider | null {
  * `json_object` request may be refused; the prompt asks for raw JSON anyway and
  * safeParse() salvages it.
  */
+const MAX_ATTEMPTS = 6;
+const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
+
+/**
+ * How long to wait after a 429. Providers usually say precisely how long
+ * ("Please try again in 3.2925s", or a Retry-After header); only fall back to
+ * exponential backoff when they do not.
+ */
+function retryDelayMs(err: unknown, attempt: number): number {
+  const message = (err as Error)?.message ?? '';
+
+  const spelled = message.match(/try again in\s+([\d.]+)\s*(ms|s|m)?/i);
+  if (spelled) {
+    const value = parseFloat(spelled[1]);
+    const unit = (spelled[2] ?? 's').toLowerCase();
+    const ms = unit === 'ms' ? value : unit === 'm' ? value * 60_000 : value * 1000;
+    return Math.min(ms + 250, 60_000); // small cushion for clock skew
+  }
+
+  const headers = (err as { headers?: Record<string, string> })?.headers;
+  const retryAfter = headers?.['retry-after'] ?? headers?.['x-ratelimit-reset-tokens'];
+  if (retryAfter) {
+    const seconds = parseFloat(retryAfter);
+    if (Number.isFinite(seconds)) return Math.min(seconds * 1000 + 250, 60_000);
+  }
+
+  return Math.min(1000 * 2 ** attempt + Math.random() * 500, 30_000);
+}
+
+function isRateLimit(err: unknown): boolean {
+  const status = (err as { status?: number })?.status;
+  return status === 429 || /rate.?limit|too many requests/i.test((err as Error)?.message ?? '');
+}
+
 async function chatJson(
   client: OpenAI,
   provider: Provider,
   prompt: string,
   temperature: number,
 ): Promise<string> {
-  const base = {
-    messages: [{ role: 'user' as const, content: prompt }],
-    model: provider.model,
-    temperature,
-  };
+  let jsonMode = true;
 
-  try {
-    const completion = await client.chat.completions.create({
-      ...base,
-      response_format: { type: 'json_object' },
-    });
-    return completion.choices[0]?.message?.content ?? '';
-  } catch (err) {
-    const message = (err as Error).message ?? '';
-
-    if (/response_format|json_object|json_mode/i.test(message)) {
-      console.warn(`[generate] ${provider.label} rejected response_format; retrying without it.`);
-      const completion = await client.chat.completions.create(base);
+  for (let attempt = 1; ; attempt++) {
+    try {
+      const completion = await client.chat.completions.create({
+        messages: [{ role: 'user', content: prompt }],
+        model: provider.model,
+        temperature,
+        ...(jsonMode ? { response_format: { type: 'json_object' as const } } : {}),
+      });
       return completion.choices[0]?.message?.content ?? '';
-    }
+    } catch (err) {
+      const message = (err as Error).message ?? '';
 
-    if (/does not exist|not found|404|decommission|deprecat/i.test(message)) {
-      throw new Error(
-        `${provider.label} rejected the model "${provider.model}". Set ${provider.modelEnvVar} in your environment to a model your account can use. ${message}`,
-      );
-    }
+      // Gemini's compatibility layer may refuse plain json_object mode.
+      if (jsonMode && /response_format|json_object|json_mode/i.test(message)) {
+        console.warn(`[generate] ${provider.label} rejected response_format; retrying without it.`);
+        jsonMode = false;
+        continue;
+      }
 
-    throw err;
+      if (isRateLimit(err)) {
+        if (attempt >= MAX_ATTEMPTS) {
+          throw new Error(
+            `${provider.label} rate limit hit ${attempt} times and did not clear. Lower the response count, set LLM_BATCH_SIZE smaller, or switch provider. ${message}`,
+          );
+        }
+        const wait = retryDelayMs(err, attempt);
+        console.warn(
+          `[generate] ${provider.label} rate limited (attempt ${attempt}/${MAX_ATTEMPTS}); waiting ${Math.round(wait)}ms`,
+        );
+        await sleep(wait);
+        continue;
+      }
+
+      if (/does not exist|not found|404|decommission|deprecat/i.test(message)) {
+        throw new Error(
+          `${provider.label} rejected the model "${provider.model}". Set ${provider.modelEnvVar} in your environment to a model your account can use. ${message}`,
+        );
+      }
+
+      throw err;
+    }
   }
 }
 
-const BATCH_SIZE = 10;
-const BATCH_CONCURRENCY = 3;
+// Free tiers cap tokens-per-minute, and parallel calls burst straight through
+// that ceiling. Sequential by default; raise it if your plan allows.
+const BATCH_SIZE = clamp(toInt(process.env.LLM_BATCH_SIZE) ?? 10, 1, 25);
+const BATCH_CONCURRENCY = clamp(toInt(process.env.LLM_CONCURRENCY) ?? 1, 1, 8);
 const MAX_COUNT = 100;
 
 /* ------------------------------------------------------------------ */
@@ -387,7 +463,15 @@ export async function POST(req: Request) {
       return true;
     });
 
-    const client = new OpenAI({ apiKey: provider.apiKey, baseURL: provider.baseURL });
+    const client = new OpenAI({
+      apiKey: provider.apiKey,
+      baseURL: provider.baseURL,
+      // The SDK's own retries are silent and use their own backoff. chatJson()
+      // honours the wait the provider actually reports and logs each attempt,
+      // so it owns retrying.
+      maxRetries: 0,
+      timeout: 120_000,
+    });
     console.log(`[generate] using ${provider.label} / ${provider.model}`);
     const contextText = typeof context === 'string' ? context : '';
 
@@ -474,16 +558,29 @@ export async function POST(req: Request) {
       .filter(Boolean)
       .join('\n');
 
+    // A batch that fails must not discard the batches that already succeeded —
+    // the rows we have are enough to fill the campaign.
+    const batchErrors: string[] = [];
     const rawBatches = await mapLimit(batches, BATCH_CONCURRENCY, async (n) => {
       const prompt = `${basePrompt}\n\nReturn ONLY raw JSON shaped as {"responses":[ ... ]} containing exactly ${n} response objects.`;
-      const raw = await chatJson(client, provider, prompt, 0.9);
-      return extractRows(safeParse(raw || '{}'));
+      try {
+        const raw = await chatJson(client, provider, prompt, 0.9);
+        return extractRows(safeParse(raw || '{}'));
+      } catch (err) {
+        console.warn(`[generate] a batch of ${n} failed: ${(err as Error).message}`);
+        batchErrors.push((err as Error).message);
+        return [] as Record<string, unknown>[];
+      }
     });
 
     const rawRows = rawBatches.flat();
     if (rawRows.length === 0) {
       return NextResponse.json(
-        { error: 'The model did not return any usable responses. Try again or reduce the response count.' },
+        {
+          error:
+            batchErrors[0] ??
+            'The model did not return any usable responses. Try again or reduce the response count.',
+        },
         { status: 502 },
       );
     }
@@ -536,6 +633,12 @@ export async function POST(req: Request) {
 
     const notes = Array.from(repairNotes.entries()).map(([note, n]) => `${note} (${n}x)`);
     if (notes.length) console.log('[generate] repairs:', notes.join(', '));
+
+    if (batchErrors.length) {
+      notes.unshift(
+        `${batchErrors.length} generation batch(es) failed, so only ${rawRows.length} unique responses were produced and some were reused to reach ${requested}. Cause: ${batchErrors[0]}`,
+      );
+    }
 
     const resolvedPageCount = typeof pageCount === 'number' && pageCount > 0 ? pageCount : undefined;
 
