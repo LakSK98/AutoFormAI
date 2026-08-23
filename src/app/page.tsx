@@ -377,18 +377,39 @@ export default function Home() {
                     ))}
                   </div>
                 )}
-                <button
-                  onClick={() => {
-                    setStep(1);
-                    setUrl("");
-                    setFormConfig(null);
-                    setTestResult(null);
-                    setScheduleWarnings([]);
-                  }}
-                  className="mt-8 px-8 py-3 bg-slate-800 hover:bg-slate-700 text-white rounded-xl transition"
-                >
-                  Start Another
-                </button>
+                {/* The scraped form is still valid, so another campaign against
+                    the same form needs no re-extraction. The URL is kept either
+                    way so nothing has to be pasted again. */}
+                <div className="mt-8 flex flex-col sm:flex-row gap-3 justify-center">
+                  <button
+                    onClick={() => {
+                      setStep(2);
+                      setTestResult(null);
+                      setScheduleWarnings([]);
+                      setScheduleError("");
+                    }}
+                    className="px-8 py-3 btn-primary rounded-xl font-semibold"
+                  >
+                    New campaign, same form
+                  </button>
+                  <button
+                    onClick={() => {
+                      setStep(1);
+                      setFormConfig(null);
+                      setTestResult(null);
+                      setScheduleWarnings([]);
+                      setScheduleError("");
+                    }}
+                    className="px-8 py-3 bg-slate-800 hover:bg-slate-700 text-white rounded-xl transition"
+                  >
+                    Use a different form
+                  </button>
+                </div>
+                {formConfig && (
+                  <p className="text-xs text-muted-foreground truncate max-w-md mx-auto">
+                    Form still loaded: {formConfig.title}
+                  </p>
+                )}
               </motion.div>
             )}
           </AnimatePresence>

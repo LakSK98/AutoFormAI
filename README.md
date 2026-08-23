@@ -23,7 +23,8 @@ npm run dev
 | `LLM_BASE_URL` | no | Any OpenAI-compatible endpoint (Ollama, OpenRouter, Together). Wins over all keys. |
 | `LLM_MODEL` / `LLM_API_KEY` / `LLM_LABEL` | no | Model, key and display name for `LLM_BASE_URL`. |
 | `LLM_PROVIDER` | no | Force one provider by name when several keys are set. |
-| `LLM_BATCH_SIZE` | no | Responses generated per request. Default 10. |
+| `LLM_BATCH_SIZE` | no | Responses per request. Default 10. **Raise** this to cut total token use. |
+| `LLM_TIME_BUDGET_S` | no | Stop generating after this many seconds. Default 45 (Vercel Hobby kills at 60). |
 | `LLM_CONCURRENCY` | no | Parallel generation requests. Default 1 — raise only on a paid plan. |
 | `QSTASH_TOKEN` | yes | Queues and delays the submissions. |
 | `QSTASH_URL` | no | Points the QStash SDK at a local QStash dev server. |
@@ -66,6 +67,14 @@ several calls in quick succession. The app handles this rather than failing:
   ("Please try again in 3.2925s") rather than guessing.
 - If a batch still fails, the responses that *did* generate are kept and reused to fill the
   campaign; the run reports how many were unique instead of failing outright.
+- A **time budget** (`LLM_TIME_BUDGET_S`, default 45s) stops generation before the platform's
+  function timeout can kill the request. Hitting it returns a clear error in under a second
+  instead of a silent 504.
+
+**Batch size and TPM pull in opposite directions.** The field schema is re-sent with every
+batch, so *more, smaller* batches burn **more** total tokens. Against a tokens-per-minute cap
+like Groq's 8,000, raise `LLM_BATCH_SIZE` (up to 25) to send the schema fewer times. Shrink it
+only if a single request is itself too large.
 
 Rough free-tier ceilings (verify before relying on them — they change often):
 

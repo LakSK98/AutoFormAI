@@ -128,11 +128,15 @@ function isRateLimit(err: unknown): boolean {
   return status === 429 || /rate.?limit|too many requests/i.test((err as Error)?.message ?? '');
 }
 
+/** Thrown when there is no time left to keep waiting on rate limits. */
+class TimeBudgetExceeded extends Error {}
+
 async function chatJson(
   client: OpenAI,
   provider: Provider,
   prompt: string,
   temperature: number,
+  deadline: number,
 ): Promise<string> {
   let jsonMode = true;
 
@@ -158,10 +162,20 @@ async function chatJson(
       if (isRateLimit(err)) {
         if (attempt >= MAX_ATTEMPTS) {
           throw new Error(
-            `${provider.label} rate limit hit ${attempt} times and did not clear. Lower the response count, set LLM_BATCH_SIZE smaller, or switch provider. ${message}`,
+            `${provider.label} rate limit did not clear after ${attempt} attempts. Raise LLM_BATCH_SIZE so the field schema is sent fewer times, lower the response count, or switch to a provider with more headroom. ${message}`,
           );
         }
+
         const wait = retryDelayMs(err, attempt);
+
+        // Better to stop and schedule what we have than to be killed
+        // mid-request by the platform's function timeout.
+        if (Date.now() + wait > deadline) {
+          throw new TimeBudgetExceeded(
+            `${provider.label} asked for a ${Math.round(wait / 1000)}s wait, which exceeds the remaining time budget.`,
+          );
+        }
+
         console.warn(
           `[generate] ${provider.label} rate limited (attempt ${attempt}/${MAX_ATTEMPTS}); waiting ${Math.round(wait)}ms`,
         );
@@ -184,6 +198,9 @@ async function chatJson(
 // that ceiling. Sequential by default; raise it if your plan allows.
 const BATCH_SIZE = clamp(toInt(process.env.LLM_BATCH_SIZE) ?? 10, 1, 25);
 const BATCH_CONCURRENCY = clamp(toInt(process.env.LLM_CONCURRENCY) ?? 1, 1, 8);
+// Vercel's Hobby plan kills functions at 60s regardless of `maxDuration`, so
+// leave headroom to still schedule whatever generated. Raise on Pro.
+const TIME_BUDGET_MS = clamp(toInt(process.env.LLM_TIME_BUDGET_S) ?? 45, 10, 280) * 1000;
 const MAX_COUNT = 100;
 
 /* ------------------------------------------------------------------ */
@@ -443,6 +460,7 @@ export async function POST(req: Request) {
     const isTest = mode === 'test';
     const requested = isTest ? 1 : clamp(toInt(count) ?? 1, 1, MAX_COUNT);
 
+    const deadline = Date.now() + TIME_BUDGET_MS;
     const provider = resolveProvider();
     if (!provider) {
       return NextResponse.json(
@@ -507,7 +525,7 @@ export async function POST(req: Request) {
           'Return ONLY raw JSON: {"intents":{"entry.123":"positive"|"negative"|"random"},"excludedOptions":["string"]}',
         ].join('\n');
 
-        const raw = await chatJson(client, provider, classifyPrompt, 0);
+        const raw = await chatJson(client, provider, classifyPrompt, 0, deadline);
         const parsed = safeParse(raw || '{}') as any;
         if (parsed?.intents && typeof parsed.intents === 'object') {
           for (const [name, intent] of Object.entries(parsed.intents)) {
@@ -563,8 +581,12 @@ export async function POST(req: Request) {
     const batchErrors: string[] = [];
     const rawBatches = await mapLimit(batches, BATCH_CONCURRENCY, async (n) => {
       const prompt = `${basePrompt}\n\nReturn ONLY raw JSON shaped as {"responses":[ ... ]} containing exactly ${n} response objects.`;
+      if (Date.now() >= deadline) {
+        batchErrors.push('ran out of time before this batch started');
+        return [] as Record<string, unknown>[];
+      }
       try {
-        const raw = await chatJson(client, provider, prompt, 0.9);
+        const raw = await chatJson(client, provider, prompt, 0.9, deadline);
         return extractRows(safeParse(raw || '{}'));
       } catch (err) {
         console.warn(`[generate] a batch of ${n} failed: ${(err as Error).message}`);

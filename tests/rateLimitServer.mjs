@@ -9,6 +9,7 @@ import http from 'node:http';
 
 const PORT = Number(process.env.PORT ?? 3200);
 const FAIL_FIRST = Number(process.env.FAIL_FIRST ?? 2);
+const WAIT_S = Number(process.env.WAIT_S ?? 1.5);
 
 let calls = 0;
 
@@ -31,7 +32,7 @@ http
           JSON.stringify({
             error: {
               message:
-                'Rate limit reached for model `fake-model` on tokens per minute (TPM): Limit 8000, Used 5784, Requested 2655. Please try again in 1.5s.',
+                `Rate limit reached for model \`fake-model\` on tokens per minute (TPM): Limit 8000, Used 5784, Requested 2655. Please try again in ${WAIT_S}s.`,
               type: 'rate_limit_exceeded',
             },
           }),
